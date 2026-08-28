@@ -55,6 +55,29 @@ def summarize_replays(replays: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def summarize_replays_by_market_cap(replays: pd.DataFrame) -> pd.DataFrame:
+    if replays.empty or "market_cap_bucket" not in replays.columns:
+        return pd.DataFrame()
+    rows = []
+    dims = ["market_cap_bucket", "variant", "split", "rule_id"]
+    for keys, g in replays.groupby(dims, dropna=False):
+        returns = pd.to_numeric(g["return_pct"], errors="coerce").dropna()
+        if returns.empty:
+            continue
+        rows.append({
+            "market_cap_bucket": keys[0] if pd.notna(keys[0]) else "UNKNOWN",
+            "variant": keys[1],
+            "split": keys[2],
+            "rule_id": keys[3],
+            "n": int(len(returns)),
+            "expectancy": float(returns.mean()),
+            "median_return": float(returns.median()),
+            "win_rate": float((returns > 0).mean()),
+            "profit_factor": float(profit_factor(returns)),
+        })
+    return pd.DataFrame(rows)
+
+
 def attach_variants(replays: pd.DataFrame) -> pd.DataFrame:
     if replays.empty:
         return replays.copy()
@@ -109,17 +132,26 @@ def build_latest_results(run_meta: dict, ignitions: pd.DataFrame, replay_summary
             train = train.sort_values(["profit_factor", "expectancy", "n"], ascending=[False, False, False])
             best_rules = train.head(5).replace({np.inf: None, -np.inf: None}).to_dict("records")
 
+    cap_counts = {}
+    if not latest.empty and "market_cap_bucket" in latest.columns:
+        cap_counts = latest["market_cap_bucket"].fillna("UNKNOWN").value_counts().to_dict()
+
     return {
         "run": run_meta,
         "research_status": {
             "leo_is_event_selector": True,
             "morning_0930_1030": "OBSERVE_ONLY",
             "priority_variants": ["LEO_BOTH_MIDDAY", "LEO_BOTH_AH"],
+            "market_cap_tagging": "PROSPECTIVE_ONLY_FROM_2026-08-28",
             "note": "Historical 2026-06-03..2026-08-27 test block has already been inspected; future data is the prospective holdout.",
         },
         "latest_day": latest_day,
+        "latest_market_cap_counts": cap_counts,
         "latest_tradable_ignitions": tradable[[
-            c for c in ["symbol", "date", "timestamp", "population", "ignition_window", "entry_price_slipped"] if c in tradable.columns
+            c for c in [
+                "symbol", "date", "timestamp", "population", "ignition_window", "entry_price_slipped",
+                "market_cap", "market_cap_bucket", "is_microcap", "market_cap_source", "market_cap_asof",
+            ] if c in tradable.columns
         ]].to_dict("records") if not tradable.empty else [],
         "best_development_validation_rules": best_rules,
     }

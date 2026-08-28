@@ -1,6 +1,12 @@
 import pandas as pd
 
-from scanner.serclick.reporting import apply_variant, build_shortlist, profit_factor, summarize_replays
+from scanner.serclick.reporting import (
+    apply_variant,
+    build_shortlist,
+    profit_factor,
+    summarize_replays,
+    summarize_replays_by_market_cap,
+)
 
 
 def _ignitions():
@@ -33,6 +39,20 @@ def test_replay_summary_reports_expectancy_win_rate_and_pf():
     assert round(row["expectancy"], 6) == 0.05
     assert round(row["win_rate"], 6) == round(2 / 3, 6)
     assert row["profit_factor"] == 4.0
+
+
+def test_market_cap_summary_keeps_microcap_and_small_cap_separate():
+    df = pd.DataFrame([
+        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "market_cap_bucket": "MICROCAP", "return_pct": 0.10},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "market_cap_bucket": "MICROCAP", "return_pct": -0.05},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "market_cap_bucket": "SMALL_CAP", "return_pct": 0.02},
+    ])
+    out = summarize_replays_by_market_cap(df)
+    micro = out[out["market_cap_bucket"].eq("MICROCAP")].iloc[0]
+    small = out[out["market_cap_bucket"].eq("SMALL_CAP")].iloc[0]
+    assert micro["n"] == 2
+    assert micro["profit_factor"] == 2.0
+    assert small["n"] == 1
 
 
 def test_shortlist_prioritizes_both_tradable_ignition_over_watch_names():

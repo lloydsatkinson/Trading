@@ -16,9 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: .
-      HAS_ALPACA_SECRET: ${{ secrets.Alpaca != '' }}
-      HAS_APCA_KEY_ID: ${{ secrets.APCA_API_KEY_ID != '' }}
-      HAS_APCA_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,8 +30,3 @@ jobs:
         run: pytest -q
       - name: Compile Python
         run: python -m compileall -q scanner scripts
-      - name: Check Alpaca secret names
-        run: |
-          echo "Alpaca=$HAS_ALPACA_SECRET"
-          echo "APCA_API_KEY_ID=$HAS_APCA_KEY_ID"
-          echo "APCA_API_SECRET_KEY=$HAS_APCA_SECRET_KEY"

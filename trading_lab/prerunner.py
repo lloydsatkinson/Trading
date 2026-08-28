@@ -82,7 +82,9 @@ def build_snapshots(
 
     A row is computed from bars whose timestamp minute is at or before the requested
     freeze minute. Historical opening RVOL uses the exact same 09:30-to-freeze
-    elapsed window on prior sessions.
+    elapsed window on prior sessions. The signal timestamp is the requested freeze
+    time itself, not the timestamp of the most recent print, so sparse microcaps
+    cannot accidentally enter before the information freeze.
     """
     x = _prepared(day_bars)
     if x.empty:
@@ -101,7 +103,8 @@ def build_snapshots(
     rows: list[dict] = []
     for freeze in freeze_times:
         fm = _clock_minute(freeze)
-        seen = x[x["minute"] <= fm]
+        freeze_ts = pd.Timestamp(f"{session_date} {freeze}", tz=NY).tz_convert("UTC")
+        seen = x[x["timestamp"] <= freeze_ts]
         if seen.empty:
             continue
         last = seen.iloc[-1]
@@ -153,7 +156,8 @@ def build_snapshots(
             "session_date": session_date,
             "freeze_time": freeze,
             "freeze_minute": fm,
-            "signal_ts": last["timestamp"].isoformat(),
+            "signal_ts": freeze_ts.isoformat(),
+            "last_bar_ts": last["timestamp"].isoformat(),
             "snapshot_price": snapshot_price,
             "previous_close": previous_close,
             "pm_last": pm_last,

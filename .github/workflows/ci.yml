@@ -2,9 +2,9 @@ name: Trading Lab CI
 
 on:
   push:
-    branches: [main, feat/small-cap-research-lab]
+    branches: [main, feat/small-cap-research-lab, feat/microcap-long-short-prerunner]
   pull_request:
-    branches: [main]
+    branches: [main, feat/small-cap-research-lab]
 
 jobs:
   test:

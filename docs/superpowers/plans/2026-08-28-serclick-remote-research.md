@@ -72,7 +72,7 @@
 
 ### Task 6: Remote verification and integration
 
-- [ ] Push implementation to isolated branch.
-- [ ] Open a pull request against `main`.
-- [ ] Inspect GitHub Actions/check state where available.
-- [ ] Merge only after repository-level verification or explicit acknowledgement of the one-time secret blocker.
+- [x] Push implementation to isolated branch.
+- [x] Open a pull request against `main`.
+- [x] Inspect GitHub Actions/check state: PR merge commit passed 12/12 tests and Python compile on GitHub Actions.
+- [ ] Merge only after repository-level verification and the one-time Alpaca repository secrets are acknowledged/set.

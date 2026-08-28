@@ -1,0 +1,69 @@
+name: SerClick 60D Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      sessions:
+        description: Number of completed trading sessions
+        required: false
+        default: "60"
+  schedule:
+    - cron: "0 6 * * 6"
+
+permissions:
+  contents: read
+
+jobs:
+  sixty-day-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      APCA_API_BASE_URL: https://paper-api.alpaca.markets
+      PYTHONPATH: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Restore SerClick market-data cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache/serclick_alpaca
+          key: serclick-60d-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            serclick-60d-${{ runner.os }}-
+            serclick-daily-${{ runner.os }}-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Unit tests
+        run: pytest -q
+      - name: Run rolling research study
+        shell: bash
+        run: |
+          SESSIONS="${{ github.event.inputs.sessions }}"
+          if [ -z "$SESSIONS" ]; then SESSIONS=60; fi
+          python scripts/run_remote_pipeline.py --feed sip --sessions "$SESSIONS"
+      - name: Publish news to job summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f data/latest/serclick_news.md ]; then
+            cat data/latest/serclick_news.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "SerClick pipeline did not produce news.md. Inspect logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload research artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serclick-60d-${{ github.run_id }}
+          path: |
+            data/latest/
+            data/research/serclick_alpaca/
+          if-no-files-found: warn
+          retention-days: 30

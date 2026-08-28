@@ -44,7 +44,7 @@ jobs:
           fi
       - name: Run 60-session SIP tournament
         if: steps.creds.outputs.ok == 'true'
-        run: python scripts/run_intraday_tournament.py --days 60 --end-date 2026-08-11 --feed sip --output output/intraday_tournament --slip-bps 20
+        run: python -m scripts.run_intraday_tournament --days 60 --end-date 2026-08-11 --feed sip --output output/intraday_tournament --slip-bps 20
       - name: Remove bulky minute cache from artifact
         if: always()
         run: rm -f output/intraday_tournament/history/minute_candidates.csv.gz || true

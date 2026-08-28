@@ -54,7 +54,13 @@ def test_final_collapse_is_rejected():
     assert result.reason == "FINAL_EXPECTANCY_NON_POSITIVE"
 
 
-def test_early_runner_preset_is_frozen():
+def test_runner_presets_are_frozen():
     rules={r.name:r for r in candidate_strategies()}
-    r=rules["CATALYST_EARLY_RUNNER"]
-    assert (r.min_price,r.max_price,r.move_1d,r.rvol,r.max_daily_rank,r.require_fresh_sec_days)==(1.0,20.0,(.05,.15),(2.0,10.0),25,3)
+    early=rules["CATALYST_EARLY_RUNNER"]
+    assert (early.min_price,early.max_price,early.move_1d,early.rvol,early.max_daily_rank,early.require_fresh_sec_days)==(1.0,20.0,(.05,.15),(2.0,10.0),25,3)
+
+    robust=rules["CATALYST_ROBUST_3_12"]
+    assert (robust.min_price,robust.max_price,robust.move_1d,robust.rvol,robust.min_dollar_volume,robust.max_daily_rank,robust.require_fresh_sec_days)==(1.0,20.0,(.03,.12),(2.0,10.0),250_000,25,3)
+
+    hf=rules["CATALYST_HF_6_15"]
+    assert (hf.min_price,hf.max_price,hf.move_1d,hf.rvol,hf.min_dollar_volume,hf.max_daily_rank,hf.require_fresh_sec_days)==(1.0,20.0,(.06,.15),(1.5,10.0),250_000,30,3)

@@ -14,6 +14,11 @@ import requests
 ET = ZoneInfo("America/New_York")
 NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks"
 PROSPECTIVE_START = date(2026, 8, 28)
+SNAPSHOT_COLUMNS = ["symbol", "market_cap", "market_cap_source", "market_cap_asof"]
+
+
+def empty_snapshot() -> pd.DataFrame:
+    return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
 
 
 def parse_market_cap(value: Any) -> float:
@@ -71,7 +76,7 @@ def enrich_market_caps(signals: pd.DataFrame, snapshot: pd.DataFrame) -> pd.Data
     for col in ("market_cap_source", "market_cap_asof"):
         if col not in snap.columns:
             snap[col] = None
-    snap = snap[["symbol", "market_cap", "market_cap_source", "market_cap_asof"]].drop_duplicates("symbol", keep="last")
+    snap = snap[SNAPSHOT_COLUMNS].drop_duplicates("symbol", keep="last")
     out = out.merge(snap, on="symbol", how="left")
     out["market_cap_bucket"] = out["market_cap"].map(classify_market_cap)
     out["is_microcap"] = out["market_cap_bucket"].eq("MICROCAP")
@@ -119,9 +124,12 @@ def fetch_nasdaq_market_caps(session: requests.Session | None = None, timeout: i
             "market_cap_source": "NASDAQ_SCREENER_CURRENT",
             "market_cap_asof": observed,
         })
-    return pd.DataFrame(records).drop_duplicates("symbol", keep="last") if records else pd.DataFrame(
-        columns=["symbol", "market_cap", "market_cap_source", "market_cap_asof"]
-    )
+    return pd.DataFrame(records).drop_duplicates("symbol", keep="last") if records else empty_snapshot()
+
+
+def _snapshot_path(root: str | Path, signal_day: Any) -> Path:
+    day = pd.Timestamp(signal_day).date().isoformat()
+    return Path(root) / "data" / "cache" / "serclick_alpaca" / "fundamentals" / f"market_caps_{day}.csv.gz"
 
 
 def load_or_fetch_market_cap_snapshot(
@@ -130,13 +138,10 @@ def load_or_fetch_market_cap_snapshot(
     session: requests.Session | None = None,
 ) -> pd.DataFrame:
     if not should_enrich_prospectively(signal_day):
-        return pd.DataFrame(columns=["symbol", "market_cap", "market_cap_source", "market_cap_asof"])
+        return empty_snapshot()
 
-    root = Path(root)
-    day = pd.Timestamp(signal_day).date().isoformat()
-    cache_dir = root / "data" / "cache" / "serclick_alpaca" / "fundamentals"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"market_caps_{day}.csv.gz"
+    cache_file = _snapshot_path(root, signal_day)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
     if cache_file.exists():
         return pd.read_csv(cache_file)
 
@@ -144,8 +149,27 @@ def load_or_fetch_market_cap_snapshot(
         snapshot = fetch_nasdaq_market_caps(session=session)
     except Exception as exc:
         print(f"Market-cap enrichment unavailable: {type(exc).__name__}: {exc}")
-        return pd.DataFrame(columns=["symbol", "market_cap", "market_cap_source", "market_cap_asof"])
+        return empty_snapshot()
 
     if not snapshot.empty:
         snapshot.to_csv(cache_file, index=False, compression="gzip")
     return snapshot
+
+
+def enrich_market_caps_from_history(root: str | Path, signals: pd.DataFrame) -> pd.DataFrame:
+    """Attach only snapshots that were actually captured for each signal date.
+
+    Missing dates remain UNKNOWN. This deliberately prevents a current market cap
+    from being backfilled onto older historical signals.
+    """
+    if signals.empty:
+        return signals.copy()
+    if "date" not in signals.columns:
+        return enrich_market_caps(signals, empty_snapshot())
+
+    frames: list[pd.DataFrame] = []
+    for day, group in signals.groupby(signals["date"].astype(str), sort=False):
+        cache_file = _snapshot_path(root, day)
+        snapshot = pd.read_csv(cache_file) if cache_file.exists() else empty_snapshot()
+        frames.append(enrich_market_caps(group.copy(), snapshot))
+    return pd.concat(frames, ignore_index=True) if frames else signals.copy()

@@ -125,7 +125,7 @@ def prepare(client,output,days=60,end_date=date(2026,8,11),max_symbols=None):
         if j+1<len(context) and context[j+1] in evals:cand[context[j+1]].append(s)
     rows=[];coarse_rows=[]
     for no,d in enumerate(evals,1):
-        names=sorted(set(cand[d]));print(f'minute {no:03d}/{len(evals)} {d} candidates={len(names)}')
+        names=sorted(s for s in set(cand[d]) if (s,d) in ctx);print(f'minute {no:03d}/{len(evals)} {d} candidates={len(names)}')
         for s in names:coarse_rows.append({'date':d.isoformat(),'ticker':s,**ctx[(s,d)]})
         for b in chunks(names,80):
             q=client.bars(b,'1Min',et(d,4),et(d,16,1),d.isoformat())

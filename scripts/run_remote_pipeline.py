@@ -6,12 +6,18 @@ from pathlib import Path
 
 import pandas as pd
 
+from scanner.serclick.marketcap import (
+    enrich_market_caps,
+    enrich_market_caps_from_history,
+    load_or_fetch_market_cap_snapshot,
+)
 from scanner.serclick.pipeline import run_replay_from_cache
 from scanner.serclick.reporting import (
     build_latest_results,
     build_shortlist,
     fixed_horizon_summary,
     summarize_replays,
+    summarize_replays_by_market_cap,
     write_json,
 )
 from scanner.serclick.study import SerClickStudy
@@ -21,7 +27,13 @@ def read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path) if path.exists() and path.stat().st_size else pd.DataFrame()
 
 
-def render_news(meta: dict, shortlist: pd.DataFrame, fixed: pd.DataFrame, replay_summary: pd.DataFrame) -> str:
+def render_news(
+    meta: dict,
+    shortlist: pd.DataFrame,
+    fixed: pd.DataFrame,
+    replay_summary: pd.DataFrame,
+    market_cap_summary: pd.DataFrame,
+) -> str:
     lines = [
         "# SerClick / Leo Research News",
         "",
@@ -34,8 +46,20 @@ def render_news(meta: dict, shortlist: pd.DataFrame, fixed: pd.DataFrame, replay
         tradable = shortlist[shortlist["action"].eq("TRADABLE_RESEARCH_SIGNAL")]
         watch = shortlist[shortlist["action"].eq("WATCH")]
         lines.append(f"Latest-day priority signals: **{len(tradable)}** | BOTH watch names: **{len(watch)}**")
+        if "market_cap_bucket" in shortlist.columns:
+            counts = shortlist["market_cap_bucket"].fillna("UNKNOWN").value_counts()
+            lines.append(
+                "Market-cap tags: "
+                f"**{int(counts.get('MICROCAP', 0))} microcap** | "
+                f"{int(counts.get('SMALL_CAP', 0))} small-cap | "
+                f"{int(counts.get('LARGER', 0))} larger | "
+                f"{int(counts.get('UNKNOWN', 0))} unknown"
+            )
         if not tradable.empty:
-            cols = [c for c in ["symbol", "population", "state", "ignition_window", "entry_price_slipped"] if c in tradable.columns]
+            cols = [c for c in [
+                "symbol", "population", "state", "ignition_window", "entry_price_slipped",
+                "market_cap_bucket", "market_cap",
+            ] if c in tradable.columns]
             lines.extend(["", "## Latest research signals", "", tradable[cols].head(12).to_markdown(index=False)])
     if not fixed.empty:
         focus = fixed[
@@ -54,7 +78,19 @@ def render_news(meta: dict, shortlist: pd.DataFrame, fixed: pd.DataFrame, replay
         if not train.empty:
             cols = ["variant", "split", "rule_id", "n", "expectancy", "win_rate", "profit_factor"]
             lines.extend(["", "## Best replay rules (development/validation only)", "", train[cols].to_markdown(index=False)])
-    lines.extend(["", "> Research only. 09:30-10:30 remains an observation/trap-building window; priority execution research is LEO BOTH after 10:30 and after-hours."])
+    if not market_cap_summary.empty:
+        cap_focus = market_cap_summary[
+            market_cap_summary["market_cap_bucket"].isin(["MICROCAP", "SMALL_CAP", "LARGER"])
+            & market_cap_summary["variant"].isin(["LEO_BOTH_MIDDAY", "LEO_BOTH_AH"])
+            & (market_cap_summary["n"] >= 8)
+        ].sort_values(["profit_factor", "expectancy", "n"], ascending=[False, False, False]).head(8)
+        if not cap_focus.empty:
+            cols = ["market_cap_bucket", "variant", "split", "rule_id", "n", "expectancy", "win_rate", "profit_factor"]
+            lines.extend(["", "## Prospective market-cap check", "", cap_focus[cols].to_markdown(index=False)])
+    lines.extend([
+        "",
+        "> Research only. Market-cap tags are prospective from 2026-08-28 and are never backfilled onto the already-inspected historical sample. 09:30-10:30 remains an observation/trap-building window; priority execution research is LEO BOTH after 10:30 and after-hours.",
+    ])
     return "\n".join(lines) + "\n"
 
 
@@ -75,32 +111,48 @@ def main() -> None:
     transitions = read_csv(out_dir / "transitions.csv")
     ignitions = read_csv(out_dir / "ignitions_first.csv")
 
+    signal_day = str(candidates["date"].astype(str).max()) if not candidates.empty else str(meta["end_date"])
+    snapshot = load_or_fetch_market_cap_snapshot(root=root, signal_day=signal_day)
+    snapshot.to_csv(out_dir / "market_cap_snapshot.csv.gz", index=False, compression="gzip")
+
+    # Only date-matched snapshots previously captured by the forward process are
+    # attached. Historical dates without a snapshot remain UNKNOWN.
+    ignitions_tagged = enrich_market_caps_from_history(root=root, signals=ignitions)
+
     fixed = fixed_horizon_summary(ignitions)
     fixed.to_csv(out_dir / "fixed_horizon_summary.csv", index=False)
 
-    replay_rows = run_replay_from_cache(root=root, feed=args.feed, ignitions=ignitions)
+    replay_rows = run_replay_from_cache(root=root, feed=args.feed, ignitions=ignitions_tagged)
     replay_rows.to_csv(out_dir / "replay_grid.csv", index=False)
     replay_summary = summarize_replays(replay_rows)
     replay_summary.to_csv(out_dir / "replay_summary.csv", index=False)
+    market_cap_summary = summarize_replays_by_market_cap(replay_rows)
+    market_cap_summary.to_csv(out_dir / "market_cap_replay_summary.csv", index=False)
 
     shortlist = build_shortlist(candidates, transitions, ignitions)
+    shortlist = enrich_market_caps(shortlist, snapshot)
     shortlist.to_csv(out_dir / "latest_shortlist.csv", index=False)
 
-    latest = build_latest_results(meta, ignitions, replay_summary)
+    latest = build_latest_results(meta, ignitions_tagged, replay_summary)
     write_json(out_dir / "latest_results.json", latest)
-    (out_dir / "news.md").write_text(render_news(meta, shortlist, fixed, replay_summary), encoding="utf-8")
+    news = render_news(meta, shortlist, fixed, replay_summary, market_cap_summary)
+    (out_dir / "news.md").write_text(news, encoding="utf-8")
 
     latest_dir = root / "data" / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
     write_json(latest_dir / "serclick_latest_results.json", latest)
     shortlist.to_csv(latest_dir / "serclick_latest_shortlist.csv", index=False)
-    (latest_dir / "serclick_news.md").write_text(render_news(meta, shortlist, fixed, replay_summary), encoding="utf-8")
+    market_cap_summary.to_csv(latest_dir / "serclick_market_cap_summary.csv", index=False)
+    snapshot.to_csv(latest_dir / "serclick_market_cap_snapshot.csv.gz", index=False, compression="gzip")
+    (latest_dir / "serclick_news.md").write_text(news, encoding="utf-8")
 
+    tagged = int(shortlist["market_cap_bucket"].ne("UNKNOWN").sum()) if not shortlist.empty and "market_cap_bucket" in shortlist.columns else 0
     print("REMOTE_PIPELINE_DONE", json.dumps({
         "run_id": meta["run_id"],
         "output_dir": str(out_dir),
         "replay_rows": len(replay_rows),
         "shortlist_rows": len(shortlist),
+        "market_cap_tagged": tagged,
         "news": str(out_dir / "news.md"),
     }))
 

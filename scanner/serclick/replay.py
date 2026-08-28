@@ -107,6 +107,13 @@ def replay_signal_grid(
     entry_price = float(signal["entry_price_slipped"])
     entry_ts = signal["entry_timestamp"]
     rows = []
+    market_cap_fields = (
+        "market_cap",
+        "market_cap_bucket",
+        "is_microcap",
+        "market_cap_source",
+        "market_cap_asof",
+    )
     for rule in rules:
         result = simulate_long_trade(bars, entry_price, entry_ts, rule)
         row = {
@@ -119,6 +126,7 @@ def replay_signal_grid(
             "stop_pct": rule.stop_pct,
             "target_pct": rule.target_pct,
             "max_hold_minutes": rule.max_hold_minutes,
+            **{field: signal.get(field) for field in market_cap_fields},
             **result.to_dict(),
         }
         rows.append(row)

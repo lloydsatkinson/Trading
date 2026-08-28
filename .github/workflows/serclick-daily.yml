@@ -2,6 +2,9 @@ name: SerClick Daily Research
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - serclick-remote-research-v1
   schedule:
     - cron: "30 1 * * 2-6"
 

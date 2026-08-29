@@ -11,13 +11,16 @@ def simulate_fixed_stop(
     target: float,
     stop_pct: float,
     slip_bps: float = 20.0,
+    hold_minutes: int | None = None,
 ) -> dict:
-    """Replay an existing entry/target while replacing only the stop distance."""
+    """Replay an existing entry/target while replacing only stop and optional max hold."""
     side = side.upper()
     if side not in {"LONG", "SHORT"}:
         raise ValueError("side must be LONG or SHORT")
     if not 0 < stop_pct < 1:
         raise ValueError("stop_pct must be between 0 and 1")
+    if hold_minutes is not None and hold_minutes <= 0:
+        raise ValueError("hold_minutes must be positive")
     if bars.empty:
         raise ValueError("bars must not be empty")
 
@@ -27,6 +30,19 @@ def simulate_fixed_stop(
     x = x.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
     if x.empty:
         raise ValueError("bars contain no valid OHLC rows")
+
+    if hold_minutes is not None:
+        if "timestamp" not in x.columns:
+            raise ValueError("timestamp required when hold_minutes is set")
+        ts = pd.to_datetime(x["timestamp"], utc=True, errors="coerce")
+        x = x.loc[ts.notna()].copy()
+        x["timestamp"] = ts.loc[ts.notna()]
+        if x.empty:
+            raise ValueError("bars contain no valid timestamps")
+        cutoff = x["timestamp"].iloc[0] + pd.Timedelta(minutes=hold_minutes)
+        x = x[x["timestamp"] <= cutoff].reset_index(drop=True)
+        if x.empty:
+            raise ValueError("no bars inside requested hold window")
 
     q = slip_bps / 10000.0
     stop = entry * (1.0 - stop_pct) if side == "LONG" else entry * (1.0 + stop_pct)

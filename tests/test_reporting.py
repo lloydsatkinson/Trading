@@ -1,12 +1,11 @@
 import pandas as pd
 
+from scanner.serclick import reporting
 from scanner.serclick.reporting import (
     apply_variant,
     build_latest_results,
     build_shortlist,
     profit_factor,
-    select_best_hold_times,
-    summarize_peak_timing,
     summarize_replays,
     summarize_replays_by_market_cap,
 )
@@ -90,7 +89,7 @@ def test_select_best_hold_times_uses_only_development_validation_and_maximizes_a
         {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S20_T30_H60", "stop_pct": 0.20, "target_pct": 0.30, "max_hold_minutes": 60, "return_pct": -0.05},
         {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S20_T30_H30", "stop_pct": 0.20, "target_pct": 0.30, "max_hold_minutes": 30, "return_pct": 1.00},
     ]
-    out = select_best_hold_times(pd.DataFrame(rows), min_n=2)
+    out = reporting.select_best_hold_times(pd.DataFrame(rows), min_n=2)
     assert len(out) == 1
     assert out.iloc[0]["max_hold_minutes"] == 60
     assert out.iloc[0]["selection_splits"] == "development+validation"
@@ -103,7 +102,7 @@ def test_peak_timing_summary_deduplicates_rules_per_signal():
         {"symbol": "AAA", "date": "2026-08-28", "variant": "LEO_BOTH_MIDDAY", "split": "forward", "market_cap_bucket": "MICROCAP", "rule_id": "S20_T30_H60", "peak_return_pct": 0.20, "minutes_to_peak": 5},
         {"symbol": "BBB", "date": "2026-08-29", "variant": "LEO_BOTH_MIDDAY", "split": "forward", "market_cap_bucket": "MICROCAP", "rule_id": "S20_T30_H30", "peak_return_pct": 0.10, "minutes_to_peak": 15},
     ]
-    out = summarize_peak_timing(pd.DataFrame(rows))
+    out = reporting.summarize_peak_timing(pd.DataFrame(rows))
     row = out.iloc[0]
     assert row["market_cap_bucket"] == "MICROCAP"
     assert row["n_signals"] == 2

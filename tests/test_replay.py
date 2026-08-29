@@ -44,7 +44,7 @@ def test_replay_never_holds_past_2000_et_same_session():
     )
     assert result.exit_reason == "TIME"
     assert result.exit_timestamp == pd.Timestamp("2026-08-27 19:59", tz="America/New_York")
-    assert result.return_pct == 0.20
+    assert round(result.return_pct, 6) == 0.20
 
 
 def test_same_session_peak_records_exact_elapsed_minutes_and_ignores_post_session_bars():
@@ -60,7 +60,7 @@ def test_same_session_peak_records_exact_elapsed_minutes_and_ignores_post_sessio
         entry_timestamp=pd.Timestamp("2026-08-27 10:31", tz="America/New_York"),
     )
     assert peak.peak_timestamp == pd.Timestamp("2026-08-27 10:36", tz="America/New_York")
-    assert peak.peak_return_pct == 0.20
+    assert round(peak.peak_return_pct, 6) == 0.20
     assert peak.minutes_to_peak == 5
 
 
@@ -83,7 +83,7 @@ def test_replay_grid_preserves_prospective_market_cap_tags_and_peak_metrics():
     out = replay_signal_grid(bars, signal, rules=[ReplayRule(stop_pct=0.20, target_pct=0.20, max_hold_minutes=1)])
     assert out.iloc[0]["market_cap_bucket"] == "MICROCAP"
     assert out.iloc[0]["market_cap"] == 75_000_000.0
-    assert out.iloc[0]["peak_return_pct"] == 0.10
+    assert round(float(out.iloc[0]["peak_return_pct"]), 6) == 0.10
     assert out.iloc[0]["minutes_to_peak"] == 2
 
 

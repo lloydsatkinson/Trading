@@ -71,21 +71,18 @@ def _metric_rows(df: pd.DataFrame, sessions: int, label: str) -> list[dict]:
         neg = float(-v[v < 0].sum())
         pf = pos / neg if neg > 0 else (float("inf") if pos > 0 else 0.0)
         eq = pd.Series([0.0] + v.cumsum().tolist())
-        max_dd = float((eq.cummax() - eq).max())
-        rows.append(
-            {
-                "variant": label,
-                "candidate": candidate,
-                "n": int(len(v)),
-                "trades_per_day": float(len(v) / max(1, sessions)),
-                "profit_factor": float(pf),
-                "avg_return_pct": float(v.mean()),
-                "win_rate": float((v > 0).mean()),
-                "max_drawdown_pct_points": max_dd,
-                "avg_pnl_on_1000": float(v.mean() * 1000.0),
-                "total_pnl_on_1000_each_trade": float(v.sum() * 1000.0),
-            }
-        )
+        rows.append({
+            "variant": label,
+            "candidate": candidate,
+            "n": int(len(v)),
+            "trades_per_day": float(len(v) / max(1, sessions)),
+            "profit_factor": float(pf),
+            "avg_return_pct": float(v.mean()),
+            "win_rate": float((v > 0).mean()),
+            "max_drawdown_pct_points": float((eq.cummax() - eq).max()),
+            "avg_pnl_on_1000": float(v.mean() * 1000.0),
+            "total_pnl_on_1000_each_trade": float(v.sum() * 1000.0),
+        })
     return rows
 
 
@@ -100,6 +97,19 @@ def _baseline(candidates: pd.DataFrame) -> pd.DataFrame:
     return x
 
 
+def _market_close(session_date: str, tzinfo) -> datetime:
+    d = pd.Timestamp(session_date).date()
+    return datetime(d.year, d.month, d.day, 16, 1, tzinfo=NY).astimezone(tzinfo)
+
+
+def _bars_frame(raw: list[dict], entry_ts: pd.Timestamp) -> pd.DataFrame:
+    b = pd.DataFrame(raw).rename(columns={"t":"timestamp","o":"open","h":"high","l":"low","c":"close","v":"volume"})
+    if "timestamp" not in b.columns:
+        return pd.DataFrame()
+    b["timestamp"] = pd.to_datetime(b["timestamp"], utc=True)
+    return b[b["timestamp"] >= entry_ts].copy()
+
+
 def replay(
     client: Alpaca,
     candidates: pd.DataFrame,
@@ -108,70 +118,90 @@ def replay(
     slip_bps: float,
     hold_minutes: int,
 ) -> tuple[pd.DataFrame, list[dict]]:
-    out = []
-    missing = []
-
+    out, missing = [], []
     for session_date, day in candidates.groupby("session_date", sort=True):
         symbols = sorted(day["ticker"].unique().tolist())
         start = day["entry_ts"].min().to_pydatetime()
-        d = pd.Timestamp(session_date).date()
-        market_close = datetime(d.year, d.month, d.day, 16, 1, tzinfo=NY).astimezone(start.tzinfo)
-        wanted_end = (day["entry_ts"].max() + pd.Timedelta(minutes=hold_minutes + 1)).to_pydatetime()
-        end = min(wanted_end, market_close)
+        end = min(
+            (day["entry_ts"].max() + pd.Timedelta(minutes=hold_minutes + 1)).to_pydatetime(),
+            _market_close(str(session_date), start.tzinfo),
+        )
         bars = client.bars(symbols, "1Min", start, end, str(session_date))
-
         for _, row in day.iterrows():
-            raw = bars.get(str(row.ticker).upper(), [])
-            if not raw:
+            b = _bars_frame(bars.get(str(row.ticker).upper(), []), pd.Timestamp(row.entry_ts))
+            if b.empty:
                 missing.append({"session_date": session_date, "ticker": row.ticker, "candidate": row.candidate, "reason": "NO_BARS"})
                 continue
-
-            b = pd.DataFrame(raw)
-            rename = {"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
-            b = b.rename(columns=rename)
-            if "timestamp" not in b.columns:
-                missing.append({"session_date": session_date, "ticker": row.ticker, "candidate": row.candidate, "reason": "NO_TIMESTAMP"})
-                continue
-            b["timestamp"] = pd.to_datetime(b["timestamp"], utc=True)
-            e0 = pd.Timestamp(row.entry_ts)
-            b = b[b["timestamp"] >= e0].copy()
-            if b.empty:
-                missing.append({"session_date": session_date, "ticker": row.ticker, "candidate": row.candidate, "reason": "EMPTY_WINDOW"})
-                continue
-
-            r = simulate_fixed_stop(
-                b,
-                side=str(row.side),
-                entry=float(row.entry),
-                target=float(row.target),
-                stop_pct=stop_pct,
-                slip_bps=slip_bps,
-                hold_minutes=hold_minutes,
-            )
-            out.append(
-                {
-                    "candidate": row.candidate,
-                    "strategy": row.strategy,
-                    "side": row.side,
-                    "ticker": row.ticker,
-                    "session_date": row.session_date,
-                    "split": row.split,
-                    "entry_ts": row.entry_ts.isoformat(),
-                    "entry": float(row.entry),
-                    "original_stop": float(row.stop),
-                    "fixed_stop": float(r["stop"]),
-                    "target": float(row.target),
-                    "exit": float(r["exit"]),
-                    "exit_ts": r["exit_ts"],
-                    "reason": r["reason"],
-                    "return_pct": float(r["return_pct"]),
-                    "pnl_on_1000": float(r["return_pct"] * 1000.0),
-                    "stop_pct": stop_pct,
-                    "hold_minutes": hold_minutes,
-                }
-            )
-
+            r = simulate_fixed_stop(b, side=str(row.side), entry=float(row.entry), target=float(row.target), stop_pct=stop_pct, slip_bps=slip_bps, hold_minutes=hold_minutes)
+            out.append(_trade_row(row, r, stop_pct, hold_minutes))
     return pd.DataFrame(out), missing
+
+
+def _trade_row(row, r: dict, stop_pct: float, hold_minutes: int) -> dict:
+    return {
+        "candidate": row.candidate,
+        "strategy": row.strategy,
+        "side": row.side,
+        "ticker": row.ticker,
+        "session_date": row.session_date,
+        "split": row.split,
+        "entry_ts": row.entry_ts.isoformat(),
+        "entry": float(row.entry),
+        "original_stop": float(row.stop),
+        "fixed_stop": float(r["stop"]),
+        "target": float(row.target),
+        "exit": float(r["exit"]),
+        "exit_ts": r["exit_ts"],
+        "reason": r["reason"],
+        "return_pct": float(r["return_pct"]),
+        "pnl_on_1000": float(r["return_pct"] * 1000.0),
+        "stop_pct": stop_pct,
+        "hold_minutes": hold_minutes,
+    }
+
+
+def replay_sweep(
+    client: Alpaca,
+    candidates: pd.DataFrame,
+    *,
+    stop_pct: float,
+    slip_bps: float,
+    holds: list[int],
+) -> tuple[pd.DataFrame, list[dict]]:
+    out, missing = [], []
+    for session_date, day in candidates.groupby("session_date", sort=True):
+        symbols = sorted(day["ticker"].unique().tolist())
+        start = day["entry_ts"].min().to_pydatetime()
+        end = _market_close(str(session_date), start.tzinfo)
+        bars = client.bars(symbols, "1Min", start, end, str(session_date))
+        for _, row in day.iterrows():
+            b = _bars_frame(bars.get(str(row.ticker).upper(), []), pd.Timestamp(row.entry_ts))
+            if b.empty:
+                missing.append({"session_date": session_date, "ticker": row.ticker, "candidate": row.candidate, "reason": "NO_BARS"})
+                continue
+            for hold in holds:
+                r = simulate_fixed_stop(b, side=str(row.side), entry=float(row.entry), target=float(row.target), stop_pct=stop_pct, slip_bps=slip_bps, hold_minutes=hold)
+                out.append(_trade_row(row, r, stop_pct, hold))
+    return pd.DataFrame(out), missing
+
+
+def _write_metrics(fixed: pd.DataFrame, outdir: Path, sessions: int, stop_pct: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rows, split_rows = [], []
+    for hold, g in fixed.groupby("hold_minutes", sort=True):
+        label = f"FIXED_STOP_{stop_pct:.0%}_HOLD_{int(hold)}m"
+        for r in _metric_rows(g, sessions, label):
+            r["hold_minutes"] = int(hold)
+            rows.append(r)
+        for split, sg in g.groupby("split"):
+            for r in _metric_rows(sg, max(1, sg["session_date"].nunique()), label):
+                r["hold_minutes"] = int(hold)
+                r["split"] = split
+                split_rows.append(r)
+    m = pd.DataFrame(rows)
+    ms = pd.DataFrame(split_rows)
+    m.to_csv(outdir / "metrics.csv", index=False)
+    ms.to_csv(outdir / "metrics_splits.csv", index=False)
+    return m, ms
 
 
 def main() -> None:
@@ -181,14 +211,13 @@ def main() -> None:
     p.add_argument("--stop-pct", type=float, default=0.50)
     p.add_argument("--slip-bps", type=float, default=20.0)
     p.add_argument("--hold-minutes", type=int, default=45)
+    p.add_argument("--hold-sweep", default="")
     p.add_argument("--feed", default="sip")
     a = p.parse_args()
 
-    root = Path(a.input)
     outdir = Path(a.output)
     outdir.mkdir(parents=True, exist_ok=True)
-
-    trades, coarse = _load_inputs(root)
+    trades, coarse = _load_inputs(Path(a.input))
     candidates = select_frozen_candidates(trades, coarse)
     sessions = 60
     expected = {"SSR_FLUSH_RECLAIM_RISK_3_5": 136, "FAILED_HOD_BREAK_30_50_MIDDAY": 97}
@@ -196,52 +225,47 @@ def main() -> None:
     if got != expected:
         raise RuntimeError(f"frozen candidate counts changed: expected={expected} got={got}")
 
-    baseline = _baseline(candidates)
-    baseline.to_csv(outdir / "baseline_candidates.csv", index=False)
+    _baseline(candidates).to_csv(outdir / "baseline_candidates.csv", index=False)
+    client = Alpaca(os.getenv("APCA_API_KEY_ID", ""), os.getenv("APCA_API_SECRET_KEY", ""), a.feed)
 
-    client = Alpaca(
-        os.getenv("APCA_API_KEY_ID", ""),
-        os.getenv("APCA_API_SECRET_KEY", ""),
-        a.feed,
-    )
-    fixed, missing = replay(
-        client,
-        candidates,
-        stop_pct=a.stop_pct,
-        slip_bps=a.slip_bps,
-        hold_minutes=a.hold_minutes,
-    )
+    if a.hold_sweep:
+        holds = sorted({int(v.strip()) for v in a.hold_sweep.split(",") if v.strip()})
+        fixed, missing = replay_sweep(client, candidates, stop_pct=a.stop_pct, slip_bps=a.slip_bps, holds=holds)
+    else:
+        holds = [a.hold_minutes]
+        fixed, missing = replay(client, candidates, stop_pct=a.stop_pct, slip_bps=a.slip_bps, hold_minutes=a.hold_minutes)
+
     fixed.to_csv(outdir / "fixed_stop_trades.csv", index=False)
     pd.DataFrame(missing).to_csv(outdir / "missing.csv", index=False)
+    m, ms = _write_metrics(fixed, outdir, sessions, a.stop_pct)
 
-    metrics = []
-    metrics.extend(_metric_rows(baseline, sessions, "ORIGINAL_STRUCTURAL_STOP"))
-    label = f"FIXED_STOP_{a.stop_pct:.0%}_HOLD_{a.hold_minutes}m"
-    metrics.extend(_metric_rows(fixed, sessions, label))
-    m = pd.DataFrame(metrics)
-    m.to_csv(outdir / "metrics.csv", index=False)
+    selected = pd.DataFrame()
+    if len(holds) > 1:
+        dev = ms[ms["split"].eq("development")].copy()
+        best = dev.sort_values(["candidate", "total_pnl_on_1000_each_trade", "profit_factor"], ascending=[True, False, False]).groupby("candidate", as_index=False).head(1)[["candidate", "hold_minutes"]]
+        best = best.rename(columns={"hold_minutes":"selected_hold_from_development"})
+        selected = ms.merge(best, on="candidate", how="inner")
+        selected = selected[selected["hold_minutes"].eq(selected["selected_hold_from_development"])].copy()
+        selected.to_csv(outdir / "selected_hold_validation.csv", index=False)
 
-    split_rows = []
-    for split, g in fixed.groupby("split"):
-        for r in _metric_rows(g, max(1, g["session_date"].nunique()), label):
-            r["split"] = split
-            split_rows.append(r)
-    pd.DataFrame(split_rows).to_csv(outdir / "metrics_splits.csv", index=False)
-
-    coverage = len(fixed) / len(candidates) if len(candidates) else 0.0
+    expected_rows = len(candidates) * len(holds)
     summary = {
         "stop_pct": a.stop_pct,
-        "hold_minutes": a.hold_minutes,
+        "hold_minutes": holds,
         "slip_bps_exit": a.slip_bps,
         "candidate_count": int(len(candidates)),
+        "expected_replays": int(expected_rows),
         "replayed": int(len(fixed)),
-        "coverage": coverage,
+        "coverage": float(len(fixed) / expected_rows if expected_rows else 0.0),
         "missing": int(len(missing)),
-        "target_policy": "original strategy target preserved; stop and maximum hold are controlled independently",
+        "selection_rule": "when sweeping, select max total $ P&L in development only; validation and holdout are reporting-only",
+        "target_policy": "original strategy target preserved; stop and maximum hold controlled independently",
         "final_august_2026_08_12_to_2026_08_27": "untouched",
     }
     (outdir / "manifest.json").write_text(json.dumps(summary, indent=2))
     print(m.to_string(index=False))
+    if not selected.empty:
+        print("\nSELECTED FROM DEVELOPMENT ONLY\n", selected.to_string(index=False))
     print(json.dumps(summary, indent=2))
 
 

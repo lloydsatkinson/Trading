@@ -1,12 +1,7 @@
 import pandas as pd
 
-from scanner.serclick.replay import (
-    ReplayRule,
-    analyze_same_session_peak,
-    default_rule_grid,
-    replay_signal_grid,
-    simulate_long_trade,
-)
+from scanner.serclick import replay
+from scanner.serclick.replay import ReplayRule, default_rule_grid, replay_signal_grid, simulate_long_trade
 
 
 def _bars(rows):
@@ -59,7 +54,7 @@ def test_same_session_peak_records_exact_elapsed_minutes_and_ignores_post_sessio
         ("2026-08-27 19:59", 11.8, 11.9, 11.0, 11.2),
         ("2026-08-27 20:01", 11.2, 15.0, 11.0, 14.5),
     ])
-    peak = analyze_same_session_peak(
+    peak = replay.analyze_same_session_peak(
         bars,
         entry_price=10.0,
         entry_timestamp=pd.Timestamp("2026-08-27 10:31", tz="America/New_York"),

@@ -93,10 +93,6 @@ jobs:
     if: github.event_name == 'push' && contains(github.event.head_commit.message, '[hold-sweep-run]')
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        hold: [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300]
     env:
       APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
       APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
@@ -114,11 +110,11 @@ jobs:
           github-token: ${{ github.token }}
           repository: lloydsatkinson/Trading
           run-id: 33214478726
-      - name: Replay frozen candidates at ${{ matrix.hold }} minute hold
-        run: python -m scripts.run_fixed_stop_replay --input input/intraday --output output/hold_${{ matrix.hold }} --stop-pct 0.50 --slip-bps 20 --hold-minutes ${{ matrix.hold }} --feed sip
+      - name: Replay all hold times from one SIP data pass
+        run: python -m scripts.run_fixed_stop_replay --input input/intraday --output output/hold_sweep --stop-pct 0.50 --slip-bps 20 --hold-sweep 5,10,15,20,30,45,60,90,120,180,300 --feed sip
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hold-sweep-${{ matrix.hold }}m
-          path: output/hold_${{ matrix.hold }}/
+          name: hold-sweep-results
+          path: output/hold_sweep/
           retention-days: 14

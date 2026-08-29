@@ -29,8 +29,8 @@ def test_run_replay_from_cache_uses_symbol_day_cache(tmp_path):
     assert midday.iloc[0]["return_pct"] == 0.10
 
 
-def test_news_surfaces_variable_stop_and_1000_gbp_economics():
-    meta = {
+def _meta():
+    return {
         "run_id": "test",
         "start_date": "2026-08-01",
         "end_date": "2026-08-28",
@@ -40,6 +40,9 @@ def test_news_surfaces_variable_stop_and_1000_gbp_economics():
         "ignitions": 3,
         "universe": 1000,
     }
+
+
+def test_news_surfaces_variable_stop_and_1000_gbp_economics():
     replay_summary = pd.DataFrame([{
         "variant": "LEO_BOTH_MIDDAY",
         "split": "validation",
@@ -55,7 +58,49 @@ def test_news_surfaces_variable_stop_and_1000_gbp_economics():
         "planned_stop_gbp_1000": 500.0,
         "worst_pnl_gbp_1000": -500.0,
     }])
-    news = render_news(meta, pd.DataFrame(), pd.DataFrame(), replay_summary, pd.DataFrame())
+    news = render_news(_meta(), pd.DataFrame(), pd.DataFrame(), replay_summary, pd.DataFrame())
     assert "stop_pct" in news
     assert "avg_pnl_gbp_1000" in news
     assert "planned_stop_gbp_1000" in news
+
+
+def test_news_surfaces_max_profit_hold_and_exact_time_to_peak():
+    best_holds = pd.DataFrame([{
+        "variant": "LEO_BOTH_MIDDAY",
+        "rule_id": "S20_T30_H90",
+        "stop_pct": 0.20,
+        "target_pct": 0.30,
+        "max_hold_minutes": 90,
+        "n": 12,
+        "expectancy": 0.06,
+        "win_rate": 0.58,
+        "profit_factor": 1.9,
+        "avg_pnl_gbp_1000": 60.0,
+        "planned_stop_gbp_1000": 200.0,
+        "selection_splits": "development+validation",
+    }])
+    peak_timing = pd.DataFrame([{
+        "market_cap_bucket": "MICROCAP",
+        "variant": "LEO_BOTH_MIDDAY",
+        "split": "forward",
+        "n_signals": 9,
+        "median_minutes_to_peak": 37.0,
+        "mean_minutes_to_peak": 42.0,
+        "median_peak_return_pct": 0.14,
+        "avg_peak_pnl_gbp_1000": 165.0,
+    }])
+    news = render_news(
+        _meta(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        best_holds,
+        peak_timing,
+    )
+    assert "Hold-time replay" in news
+    assert "Max-profit hold times" in news
+    assert "90" in news
+    assert "Exact time-to-peak" in news
+    assert "37" in news
+    assert "240" in news

@@ -3,14 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import timedelta
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 from trading_lab.alpaca_intraday import Alpaca
 from trading_lab.fixed_stop import simulate_fixed_stop
+
+NY = ZoneInfo("America/New_York")
 
 
 def _load_inputs(root: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -103,6 +106,7 @@ def replay(
     *,
     stop_pct: float,
     slip_bps: float,
+    hold_minutes: int,
 ) -> tuple[pd.DataFrame, list[dict]]:
     out = []
     missing = []
@@ -110,7 +114,10 @@ def replay(
     for session_date, day in candidates.groupby("session_date", sort=True):
         symbols = sorted(day["ticker"].unique().tolist())
         start = day["entry_ts"].min().to_pydatetime()
-        end = (day["entry_ts"].max() + pd.Timedelta(minutes=46)).to_pydatetime()
+        d = pd.Timestamp(session_date).date()
+        market_close = datetime(d.year, d.month, d.day, 16, 1, tzinfo=NY).astimezone(start.tzinfo)
+        wanted_end = (day["entry_ts"].max() + pd.Timedelta(minutes=hold_minutes + 1)).to_pydatetime()
+        end = min(wanted_end, market_close)
         bars = client.bars(symbols, "1Min", start, end, str(session_date))
 
         for _, row in day.iterrows():
@@ -127,8 +134,7 @@ def replay(
                 continue
             b["timestamp"] = pd.to_datetime(b["timestamp"], utc=True)
             e0 = pd.Timestamp(row.entry_ts)
-            e1 = e0 + pd.Timedelta(minutes=45)
-            b = b[(b["timestamp"] >= e0) & (b["timestamp"] <= e1)].copy()
+            b = b[b["timestamp"] >= e0].copy()
             if b.empty:
                 missing.append({"session_date": session_date, "ticker": row.ticker, "candidate": row.candidate, "reason": "EMPTY_WINDOW"})
                 continue
@@ -140,6 +146,7 @@ def replay(
                 target=float(row.target),
                 stop_pct=stop_pct,
                 slip_bps=slip_bps,
+                hold_minutes=hold_minutes,
             )
             out.append(
                 {
@@ -160,6 +167,7 @@ def replay(
                     "return_pct": float(r["return_pct"]),
                     "pnl_on_1000": float(r["return_pct"] * 1000.0),
                     "stop_pct": stop_pct,
+                    "hold_minutes": hold_minutes,
                 }
             )
 
@@ -172,6 +180,7 @@ def main() -> None:
     p.add_argument("--output", default="output/fixed_stop_50")
     p.add_argument("--stop-pct", type=float, default=0.50)
     p.add_argument("--slip-bps", type=float, default=20.0)
+    p.add_argument("--hold-minutes", type=int, default=45)
     p.add_argument("--feed", default="sip")
     a = p.parse_args()
 
@@ -195,19 +204,26 @@ def main() -> None:
         os.getenv("APCA_API_SECRET_KEY", ""),
         a.feed,
     )
-    fixed, missing = replay(client, candidates, stop_pct=a.stop_pct, slip_bps=a.slip_bps)
+    fixed, missing = replay(
+        client,
+        candidates,
+        stop_pct=a.stop_pct,
+        slip_bps=a.slip_bps,
+        hold_minutes=a.hold_minutes,
+    )
     fixed.to_csv(outdir / "fixed_stop_trades.csv", index=False)
     pd.DataFrame(missing).to_csv(outdir / "missing.csv", index=False)
 
     metrics = []
     metrics.extend(_metric_rows(baseline, sessions, "ORIGINAL_STRUCTURAL_STOP"))
-    metrics.extend(_metric_rows(fixed, sessions, f"FIXED_STOP_{a.stop_pct:.0%}"))
+    label = f"FIXED_STOP_{a.stop_pct:.0%}_HOLD_{a.hold_minutes}m"
+    metrics.extend(_metric_rows(fixed, sessions, label))
     m = pd.DataFrame(metrics)
     m.to_csv(outdir / "metrics.csv", index=False)
 
     split_rows = []
     for split, g in fixed.groupby("split"):
-        for r in _metric_rows(g, max(1, g["session_date"].nunique()), f"FIXED_STOP_{a.stop_pct:.0%}"):
+        for r in _metric_rows(g, max(1, g["session_date"].nunique()), label):
             r["split"] = split
             split_rows.append(r)
     pd.DataFrame(split_rows).to_csv(outdir / "metrics_splits.csv", index=False)
@@ -215,13 +231,14 @@ def main() -> None:
     coverage = len(fixed) / len(candidates) if len(candidates) else 0.0
     summary = {
         "stop_pct": a.stop_pct,
+        "hold_minutes": a.hold_minutes,
         "slip_bps_exit": a.slip_bps,
         "candidate_count": int(len(candidates)),
         "replayed": int(len(fixed)),
         "coverage": coverage,
         "missing": int(len(missing)),
-        "target_policy": "original strategy target preserved; only stop replaced",
-        "position_example": "$1,000 notional means a 50% stop caps planned price loss near $500 before gaps/slippage",
+        "target_policy": "original strategy target preserved; stop and maximum hold are controlled independently",
+        "final_august_2026_08_12_to_2026_08_27": "untouched",
     }
     (outdir / "manifest.json").write_text(json.dumps(summary, indent=2))
     print(m.to_string(index=False))

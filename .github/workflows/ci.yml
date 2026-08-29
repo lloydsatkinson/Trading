@@ -81,10 +81,44 @@ jobs:
           repository: lloydsatkinson/Trading
           run-id: 33214478726
       - name: Replay frozen candidates with 50 percent stop
-        run: python -m scripts.run_fixed_stop_replay --input input/intraday --output output/fixed_stop_50 --stop-pct 0.50 --slip-bps 20 --feed sip
+        run: python -m scripts.run_fixed_stop_replay --input input/intraday --output output/fixed_stop_50 --stop-pct 0.50 --slip-bps 20 --hold-minutes 45 --feed sip
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: fixed-stop-50-results
           path: output/fixed_stop_50/
+          retention-days: 14
+
+  hold-time-research:
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[hold-sweep-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        hold: [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300]
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: intraday-small-cap-results
+          path: input/intraday
+          github-token: ${{ github.token }}
+          repository: lloydsatkinson/Trading
+          run-id: 33214478726
+      - name: Replay frozen candidates at ${{ matrix.hold }} minute hold
+        run: python -m scripts.run_fixed_stop_replay --input input/intraday --output output/hold_${{ matrix.hold }} --stop-pct 0.50 --slip-bps 20 --hold-minutes ${{ matrix.hold }} --feed sip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hold-sweep-${{ matrix.hold }}m
+          path: output/hold_${{ matrix.hold }}/
           retention-days: 14

@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 
 
+POSITION_GBP = 1_000.0
+
 VARIANTS = {
     "ALL": lambda d: pd.Series(True, index=d.index),
     "LEO_BOTH_ALL": lambda d: d["population"].eq("BOTH"),
@@ -33,24 +35,49 @@ def profit_factor(returns: pd.Series) -> float:
     return gross_profit / gross_loss
 
 
+def _first_numeric(g: pd.DataFrame, col: str) -> float:
+    if col not in g.columns:
+        return np.nan
+    s = pd.to_numeric(g[col], errors="coerce").dropna()
+    return float(s.iloc[0]) if not s.empty else np.nan
+
+
+def _replay_metrics(g: pd.DataFrame) -> dict | None:
+    returns = pd.to_numeric(g["return_pct"], errors="coerce").dropna()
+    if returns.empty:
+        return None
+    stop_pct = _first_numeric(g, "stop_pct")
+    return {
+        "stop_pct": stop_pct,
+        "target_pct": _first_numeric(g, "target_pct"),
+        "max_hold_minutes": _first_numeric(g, "max_hold_minutes"),
+        "n": int(len(returns)),
+        "expectancy": float(returns.mean()),
+        "median_return": float(returns.median()),
+        "win_rate": float((returns > 0).mean()),
+        "profit_factor": float(profit_factor(returns)),
+        "avg_pnl_gbp_1000": float(returns.mean() * POSITION_GBP),
+        "median_pnl_gbp_1000": float(returns.median() * POSITION_GBP),
+        "worst_pnl_gbp_1000": float(returns.min() * POSITION_GBP),
+        "best_pnl_gbp_1000": float(returns.max() * POSITION_GBP),
+        "planned_stop_gbp_1000": float(stop_pct * POSITION_GBP) if np.isfinite(stop_pct) else np.nan,
+    }
+
+
 def summarize_replays(replays: pd.DataFrame) -> pd.DataFrame:
     if replays.empty:
         return pd.DataFrame()
     rows = []
     dims = ["variant", "split", "rule_id"]
     for keys, g in replays.groupby(dims, dropna=False):
-        returns = pd.to_numeric(g["return_pct"], errors="coerce").dropna()
-        if returns.empty:
+        metrics = _replay_metrics(g)
+        if metrics is None:
             continue
         rows.append({
             "variant": keys[0],
             "split": keys[1],
             "rule_id": keys[2],
-            "n": int(len(returns)),
-            "expectancy": float(returns.mean()),
-            "median_return": float(returns.median()),
-            "win_rate": float((returns > 0).mean()),
-            "profit_factor": float(profit_factor(returns)),
+            **metrics,
         })
     return pd.DataFrame(rows)
 
@@ -61,19 +88,15 @@ def summarize_replays_by_market_cap(replays: pd.DataFrame) -> pd.DataFrame:
     rows = []
     dims = ["market_cap_bucket", "variant", "split", "rule_id"]
     for keys, g in replays.groupby(dims, dropna=False):
-        returns = pd.to_numeric(g["return_pct"], errors="coerce").dropna()
-        if returns.empty:
+        metrics = _replay_metrics(g)
+        if metrics is None:
             continue
         rows.append({
             "market_cap_bucket": keys[0] if pd.notna(keys[0]) else "UNKNOWN",
             "variant": keys[1],
             "split": keys[2],
             "rule_id": keys[3],
-            "n": int(len(returns)),
-            "expectancy": float(returns.mean()),
-            "median_return": float(returns.median()),
-            "win_rate": float((returns > 0).mean()),
-            "profit_factor": float(profit_factor(returns)),
+            **metrics,
         })
     return pd.DataFrame(rows)
 
@@ -143,6 +166,9 @@ def build_latest_results(run_meta: dict, ignitions: pd.DataFrame, replay_summary
             "morning_0930_1030": "OBSERVE_ONLY",
             "priority_variants": ["LEO_BOTH_MIDDAY", "LEO_BOTH_AH"],
             "market_cap_tagging": "PROSPECTIVE_ONLY_FROM_2026-08-28",
+            "variable_stop_grid": [0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50],
+            "position_model_gbp": POSITION_GBP,
+            "rule_selection": "DEVELOPMENT_VALIDATION_ONLY",
             "note": "Historical 2026-06-03..2026-08-27 test block has already been inspected; future data is the prospective holdout.",
         },
         "latest_day": latest_day,

@@ -41,6 +41,8 @@ def render_news(
         "",
         f"Candidates: **{meta['candidates']}** | Ignitions: **{meta['ignitions']}** | Universe: **{meta['universe']}**",
         "",
+        "Variable-stop replay: **3%, 5%, 7%, 10%, 15%, 20%, 30%, 40%, 50%** | economics shown for a **£1,000 position**.",
+        "",
     ]
     if not shortlist.empty:
         tradable = shortlist[shortlist["action"].eq("TRADABLE_RESEARCH_SIGNAL")]
@@ -76,8 +78,12 @@ def render_news(
             & (replay_summary["n"] >= 8)
         ].sort_values(["profit_factor", "expectancy"], ascending=[False, False]).head(8)
         if not train.empty:
-            cols = ["variant", "split", "rule_id", "n", "expectancy", "win_rate", "profit_factor"]
-            lines.extend(["", "## Best replay rules (development/validation only)", "", train[cols].to_markdown(index=False)])
+            cols = [c for c in [
+                "variant", "split", "rule_id", "stop_pct", "target_pct", "max_hold_minutes", "n",
+                "expectancy", "win_rate", "profit_factor", "avg_pnl_gbp_1000",
+                "planned_stop_gbp_1000", "worst_pnl_gbp_1000",
+            ] if c in train.columns]
+            lines.extend(["", "## Best variable-stop replay rules (development/validation only)", "", train[cols].to_markdown(index=False)])
     if not market_cap_summary.empty:
         cap_focus = market_cap_summary[
             market_cap_summary["market_cap_bucket"].isin(["MICROCAP", "SMALL_CAP", "LARGER"])
@@ -85,11 +91,15 @@ def render_news(
             & (market_cap_summary["n"] >= 8)
         ].sort_values(["profit_factor", "expectancy", "n"], ascending=[False, False, False]).head(8)
         if not cap_focus.empty:
-            cols = ["market_cap_bucket", "variant", "split", "rule_id", "n", "expectancy", "win_rate", "profit_factor"]
-            lines.extend(["", "## Prospective market-cap check", "", cap_focus[cols].to_markdown(index=False)])
+            cols = [c for c in [
+                "market_cap_bucket", "variant", "split", "rule_id", "stop_pct", "target_pct",
+                "max_hold_minutes", "n", "expectancy", "win_rate", "profit_factor",
+                "avg_pnl_gbp_1000", "planned_stop_gbp_1000", "worst_pnl_gbp_1000",
+            ] if c in cap_focus.columns]
+            lines.extend(["", "## Prospective market-cap / variable-stop check", "", cap_focus[cols].to_markdown(index=False)])
     lines.extend([
         "",
-        "> Research only. Market-cap tags are prospective from 2026-08-28 and are never backfilled onto the already-inspected historical sample. 09:30-10:30 remains an observation/trap-building window; priority execution research is LEO BOTH after 10:30 and after-hours.",
+        "> Research only. Rule selection uses development/validation only; forward results measure rather than optimize. Market-cap tags are prospective from 2026-08-28 and are never backfilled onto the already-inspected historical sample. 09:30-10:30 remains an observation/trap-building window; priority execution research is LEO BOTH after 10:30 and after-hours.",
     ])
     return "\n".join(lines) + "\n"
 
@@ -142,6 +152,7 @@ def main() -> None:
     latest_dir.mkdir(parents=True, exist_ok=True)
     write_json(latest_dir / "serclick_latest_results.json", latest)
     shortlist.to_csv(latest_dir / "serclick_latest_shortlist.csv", index=False)
+    replay_summary.to_csv(latest_dir / "serclick_variable_stop_summary.csv", index=False)
     market_cap_summary.to_csv(latest_dir / "serclick_market_cap_summary.csv", index=False)
     snapshot.to_csv(latest_dir / "serclick_market_cap_snapshot.csv.gz", index=False, compression="gzip")
     (latest_dir / "serclick_news.md").write_text(news, encoding="utf-8")

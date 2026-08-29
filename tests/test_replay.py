@@ -1,6 +1,6 @@
 import pandas as pd
 
-from scanner.serclick.replay import ReplayRule, replay_signal_grid, simulate_long_trade
+from scanner.serclick.replay import ReplayRule, default_rule_grid, replay_signal_grid, simulate_long_trade
 
 
 def _bars(rows):
@@ -47,3 +47,10 @@ def test_replay_grid_preserves_prospective_market_cap_tags():
     out = replay_signal_grid(bars, signal, rules=[ReplayRule(stop_pct=0.20, target_pct=0.20, max_hold_minutes=1)])
     assert out.iloc[0]["market_cap_bucket"] == "MICROCAP"
     assert out.iloc[0]["market_cap"] == 75_000_000.0
+
+
+def test_default_rule_grid_includes_wide_variable_stops_through_50_percent():
+    rules = default_rule_grid()
+    stops = sorted({round(rule.stop_pct, 2) for rule in rules})
+    assert stops == [0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
+    assert len(rules) == 135

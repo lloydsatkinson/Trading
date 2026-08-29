@@ -93,7 +93,7 @@ def test_select_best_hold_times_uses_only_development_validation_and_maximizes_a
     assert len(out) == 1
     assert out.iloc[0]["max_hold_minutes"] == 60
     assert out.iloc[0]["selection_splits"] == "development+validation"
-    assert out.iloc[0]["avg_pnl_gbp_1000"] == 75.0
+    assert round(float(out.iloc[0]["avg_pnl_gbp_1000"]), 6) == 75.0
 
 
 def test_peak_timing_summary_deduplicates_rules_per_signal():
@@ -107,7 +107,7 @@ def test_peak_timing_summary_deduplicates_rules_per_signal():
     assert row["market_cap_bucket"] == "MICROCAP"
     assert row["n_signals"] == 2
     assert row["median_minutes_to_peak"] == 10.0
-    assert row["median_peak_return_pct"] == 0.15
+    assert round(float(row["median_peak_return_pct"]), 6) == 0.15
 
 
 def test_shortlist_prioritizes_both_tradable_ignition_over_watch_names():

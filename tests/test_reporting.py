@@ -2,6 +2,7 @@ import pandas as pd
 
 from scanner.serclick.reporting import (
     apply_variant,
+    build_latest_results,
     build_shortlist,
     profit_factor,
     summarize_replays,
@@ -29,9 +30,9 @@ def test_profit_factor_is_gross_profit_over_gross_loss():
 
 def test_replay_summary_reports_expectancy_win_rate_and_pf():
     df = pd.DataFrame([
-        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S05_T10_H60", "return_pct": 0.10},
-        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S05_T10_H60", "return_pct": -0.05},
-        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S05_T10_H60", "return_pct": 0.10},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S05_T10_H60", "stop_pct": 0.05, "target_pct": 0.10, "max_hold_minutes": 60, "return_pct": 0.10},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S05_T10_H60", "stop_pct": 0.05, "target_pct": 0.10, "max_hold_minutes": 60, "return_pct": -0.05},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S05_T10_H60", "stop_pct": 0.05, "target_pct": 0.10, "max_hold_minutes": 60, "return_pct": 0.10},
     ])
     out = summarize_replays(df)
     row = out.iloc[0]
@@ -41,18 +42,42 @@ def test_replay_summary_reports_expectancy_win_rate_and_pf():
     assert row["profit_factor"] == 4.0
 
 
+def test_replay_summary_reports_1000_gbp_position_and_planned_stop_loss():
+    df = pd.DataFrame([
+        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S50_T30_H60", "stop_pct": 0.50, "target_pct": 0.30, "max_hold_minutes": 60, "return_pct": 0.30},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S50_T30_H60", "stop_pct": 0.50, "target_pct": 0.30, "max_hold_minutes": 60, "return_pct": -0.50},
+    ])
+    row = summarize_replays(df).iloc[0]
+    assert row["stop_pct"] == 0.50
+    assert row["planned_stop_gbp_1000"] == 500.0
+    assert row["avg_pnl_gbp_1000"] == -100.0
+    assert row["worst_pnl_gbp_1000"] == -500.0
+
+
 def test_market_cap_summary_keeps_microcap_and_small_cap_separate():
     df = pd.DataFrame([
-        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "market_cap_bucket": "MICROCAP", "return_pct": 0.10},
-        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "market_cap_bucket": "MICROCAP", "return_pct": -0.05},
-        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "market_cap_bucket": "SMALL_CAP", "return_pct": 0.02},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "stop_pct": 0.05, "target_pct": 0.10, "max_hold_minutes": 60, "market_cap_bucket": "MICROCAP", "return_pct": 0.10},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "stop_pct": 0.05, "target_pct": 0.10, "max_hold_minutes": 60, "market_cap_bucket": "MICROCAP", "return_pct": -0.05},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S05_T10_H60", "stop_pct": 0.05, "target_pct": 0.10, "max_hold_minutes": 60, "market_cap_bucket": "SMALL_CAP", "return_pct": 0.02},
     ])
     out = summarize_replays_by_market_cap(df)
     micro = out[out["market_cap_bucket"].eq("MICROCAP")].iloc[0]
     small = out[out["market_cap_bucket"].eq("SMALL_CAP")].iloc[0]
     assert micro["n"] == 2
     assert micro["profit_factor"] == 2.0
+    assert micro["avg_pnl_gbp_1000"] == 25.0
     assert small["n"] == 1
+
+
+def test_best_rules_never_use_forward_split_for_selection():
+    replay_summary = pd.DataFrame([
+        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S20_T30_H60", "stop_pct": 0.20, "target_pct": 0.30, "max_hold_minutes": 60, "n": 10, "expectancy": 0.04, "median_return": 0.03, "win_rate": 0.60, "profit_factor": 1.8, "avg_pnl_gbp_1000": 40.0, "worst_pnl_gbp_1000": -200.0, "planned_stop_gbp_1000": 200.0},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S50_T30_H60", "stop_pct": 0.50, "target_pct": 0.30, "max_hold_minutes": 60, "n": 10, "expectancy": 0.30, "median_return": 0.30, "win_rate": 1.0, "profit_factor": 99.0, "avg_pnl_gbp_1000": 300.0, "worst_pnl_gbp_1000": 300.0, "planned_stop_gbp_1000": 500.0},
+    ])
+    ignitions = pd.DataFrame([{"symbol": "AAA", "date": "2026-08-28", "population": "BOTH", "ignition_window": "10:30-15:00"}])
+    result = build_latest_results({"end_date": "2026-08-28"}, ignitions, replay_summary)
+    selected = result["best_development_validation_rules"]
+    assert [row["rule_id"] for row in selected] == ["S20_T30_H60"]
 
 
 def test_shortlist_prioritizes_both_tradable_ignition_over_watch_names():

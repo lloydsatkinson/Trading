@@ -27,3 +27,23 @@ def test_fixed_stop_changes_only_stop_and_preserves_short_target():
     assert r["reason"] == "TARGET"
     assert r["exit"] == 9.0
     assert r["return_pct"] == 0.10
+
+
+def test_fixed_stop_honours_max_hold_minutes_before_later_target():
+    bars = pd.DataFrame([
+        {"timestamp":"2026-07-01T14:31:00Z","open":10.0,"high":10.2,"low":9.9,"close":10.1},
+        {"timestamp":"2026-07-01T14:41:00Z","open":10.1,"high":10.3,"low":10.0,"close":10.2},
+        {"timestamp":"2026-07-01T14:51:00Z","open":10.2,"high":11.2,"low":10.1,"close":11.0},
+    ])
+    r = simulate_fixed_stop(
+        bars,
+        side="LONG",
+        entry=10.0,
+        target=11.0,
+        stop_pct=0.50,
+        slip_bps=0,
+        hold_minutes=15,
+    )
+    assert r["reason"] == "TIME"
+    assert r["exit"] == 10.2
+    assert "14:41:00" in r["exit_ts"]

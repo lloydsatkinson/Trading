@@ -1,5 +1,6 @@
 import pandas as pd
 
+from scanner.serclick import reporting
 from scanner.serclick.reporting import (
     apply_variant,
     build_latest_results,
@@ -78,6 +79,35 @@ def test_best_rules_never_use_forward_split_for_selection():
     result = build_latest_results({"end_date": "2026-08-28"}, ignitions, replay_summary)
     selected = result["best_development_validation_rules"]
     assert [row["rule_id"] for row in selected] == ["S20_T30_H60"]
+
+
+def test_select_best_hold_times_uses_only_development_validation_and_maximizes_average_pnl():
+    rows = [
+        {"variant": "LEO_BOTH_MIDDAY", "split": "development", "rule_id": "S20_T30_H30", "stop_pct": 0.20, "target_pct": 0.30, "max_hold_minutes": 30, "return_pct": 0.10},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S20_T30_H30", "stop_pct": 0.20, "target_pct": 0.30, "max_hold_minutes": 30, "return_pct": -0.05},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "development", "rule_id": "S20_T30_H60", "stop_pct": 0.20, "target_pct": 0.30, "max_hold_minutes": 60, "return_pct": 0.20},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "validation", "rule_id": "S20_T30_H60", "stop_pct": 0.20, "target_pct": 0.30, "max_hold_minutes": 60, "return_pct": -0.05},
+        {"variant": "LEO_BOTH_MIDDAY", "split": "forward", "rule_id": "S20_T30_H30", "stop_pct": 0.20, "target_pct": 0.30, "max_hold_minutes": 30, "return_pct": 1.00},
+    ]
+    out = reporting.select_best_hold_times(pd.DataFrame(rows), min_n=2)
+    assert len(out) == 1
+    assert out.iloc[0]["max_hold_minutes"] == 60
+    assert out.iloc[0]["selection_splits"] == "development+validation"
+    assert round(float(out.iloc[0]["avg_pnl_gbp_1000"]), 6) == 75.0
+
+
+def test_peak_timing_summary_deduplicates_rules_per_signal():
+    rows = [
+        {"symbol": "AAA", "date": "2026-08-28", "variant": "LEO_BOTH_MIDDAY", "split": "forward", "market_cap_bucket": "MICROCAP", "rule_id": "S20_T30_H30", "peak_return_pct": 0.20, "minutes_to_peak": 5},
+        {"symbol": "AAA", "date": "2026-08-28", "variant": "LEO_BOTH_MIDDAY", "split": "forward", "market_cap_bucket": "MICROCAP", "rule_id": "S20_T30_H60", "peak_return_pct": 0.20, "minutes_to_peak": 5},
+        {"symbol": "BBB", "date": "2026-08-29", "variant": "LEO_BOTH_MIDDAY", "split": "forward", "market_cap_bucket": "MICROCAP", "rule_id": "S20_T30_H30", "peak_return_pct": 0.10, "minutes_to_peak": 15},
+    ]
+    out = reporting.summarize_peak_timing(pd.DataFrame(rows))
+    row = out.iloc[0]
+    assert row["market_cap_bucket"] == "MICROCAP"
+    assert row["n_signals"] == 2
+    assert row["median_minutes_to_peak"] == 10.0
+    assert round(float(row["median_peak_return_pct"]), 6) == 0.15
 
 
 def test_shortlist_prioritizes_both_tradable_ignition_over_watch_names():

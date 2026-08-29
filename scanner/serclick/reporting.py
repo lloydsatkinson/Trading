@@ -42,6 +42,13 @@ def _first_numeric(g: pd.DataFrame, col: str) -> float:
     return float(s.iloc[0]) if not s.empty else np.nan
 
 
+def _first_value(g: pd.DataFrame, col: str):
+    if col not in g.columns:
+        return None
+    s = g[col].dropna()
+    return s.iloc[0] if not s.empty else None
+
+
 def _replay_metrics(g: pd.DataFrame) -> dict | None:
     returns = pd.to_numeric(g["return_pct"], errors="coerce").dropna()
     if returns.empty:
@@ -98,6 +105,88 @@ def summarize_replays_by_market_cap(replays: pd.DataFrame) -> pd.DataFrame:
             "rule_id": keys[3],
             **metrics,
         })
+    return pd.DataFrame(rows)
+
+
+def select_best_hold_times(replays: pd.DataFrame, min_n: int = 8) -> pd.DataFrame:
+    """Pick the highest-average-P/L hold for each variant/stop/target.
+
+    Only development and validation trades are eligible for rule selection.
+    Forward/test rows may be reported elsewhere but cannot influence the chosen
+    hold duration.
+    """
+    if replays.empty:
+        return pd.DataFrame()
+    required = {"variant", "split", "stop_pct", "target_pct", "max_hold_minutes", "return_pct"}
+    if not required.issubset(replays.columns):
+        return pd.DataFrame()
+
+    train = replays[replays["split"].isin(["development", "validation"])].copy()
+    if train.empty:
+        return pd.DataFrame()
+
+    rows = []
+    dims = ["variant", "stop_pct", "target_pct", "max_hold_minutes"]
+    for keys, g in train.groupby(dims, dropna=False):
+        metrics = _replay_metrics(g)
+        if metrics is None or metrics["n"] < min_n:
+            continue
+        rows.append({
+            "variant": keys[0],
+            "rule_id": _first_value(g, "rule_id"),
+            **metrics,
+            "selection_splits": "development+validation",
+        })
+
+    candidates = pd.DataFrame(rows)
+    if candidates.empty:
+        return candidates
+    candidates = candidates.sort_values(
+        ["variant", "stop_pct", "target_pct", "avg_pnl_gbp_1000", "profit_factor", "n", "max_hold_minutes"],
+        ascending=[True, True, True, False, False, False, True],
+    )
+    return candidates.groupby(["variant", "stop_pct", "target_pct"], as_index=False, sort=False).head(1).reset_index(drop=True)
+
+
+def summarize_peak_timing(replays: pd.DataFrame) -> pd.DataFrame:
+    """Summarize exact same-session time-to-peak once per signal/variant."""
+    if replays.empty or not {"peak_return_pct", "minutes_to_peak", "variant", "split"}.issubset(replays.columns):
+        return pd.DataFrame()
+
+    signal_key = [c for c in ["symbol", "date", "variant", "split"] if c in replays.columns]
+    if not signal_key:
+        return pd.DataFrame()
+    signals = replays.drop_duplicates(signal_key).copy()
+
+    group_dims = ["variant", "split"]
+    if "market_cap_bucket" in signals.columns:
+        signals["market_cap_bucket"] = signals["market_cap_bucket"].fillna("UNKNOWN")
+        group_dims.append("market_cap_bucket")
+
+    rows = []
+    for keys, g in signals.groupby(group_dims, dropna=False):
+        peak = pd.to_numeric(g["peak_return_pct"], errors="coerce")
+        mins = pd.to_numeric(g["minutes_to_peak"], errors="coerce")
+        valid = peak.notna() & mins.notna()
+        if not valid.any():
+            continue
+        peak = peak[valid]
+        mins = mins[valid]
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        row = {
+            "variant": keys[0],
+            "split": keys[1],
+            "n_signals": int(valid.sum()),
+            "mean_peak_return_pct": float(peak.mean()),
+            "median_peak_return_pct": float(peak.median()),
+            "avg_peak_pnl_gbp_1000": float(peak.mean() * POSITION_GBP),
+            "mean_minutes_to_peak": float(mins.mean()),
+            "median_minutes_to_peak": float(mins.median()),
+        }
+        if len(group_dims) == 3:
+            row["market_cap_bucket"] = keys[2]
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -167,6 +256,9 @@ def build_latest_results(run_meta: dict, ignitions: pd.DataFrame, replay_summary
             "priority_variants": ["LEO_BOTH_MIDDAY", "LEO_BOTH_AH"],
             "market_cap_tagging": "PROSPECTIVE_ONLY_FROM_2026-08-28",
             "variable_stop_grid": [0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50],
+            "hold_time_grid_minutes": [5, 10, 15, 30, 45, 60, 90, 120, 180, 240],
+            "same_session_exit_cap": "BEFORE_20:00_ET",
+            "time_to_peak": "EXACT_MINUTE_BAR_HIGH_FROM_ENTRY_TO_20:00_ET",
             "position_model_gbp": POSITION_GBP,
             "rule_selection": "DEVELOPMENT_VALIDATION_ONLY",
             "note": "Historical 2026-06-03..2026-08-27 test block has already been inspected; future data is the prospective holdout.",

@@ -1,5 +1,6 @@
 import pandas as pd
 
+from scanner.serclick import replay
 from scanner.serclick.replay import ReplayRule, default_rule_grid, replay_signal_grid, simulate_long_trade
 
 
@@ -28,8 +29,43 @@ def test_time_exit_uses_last_close_within_horizon():
     assert round(result.return_pct, 6) == 0.03
 
 
-def test_replay_grid_preserves_prospective_market_cap_tags():
-    bars = _bars([("2026-08-28 11:01", 10.0, 10.2, 9.9, 10.1)])
+def test_replay_never_holds_past_2000_et_same_session():
+    bars = _bars([
+        ("2026-08-27 19:58", 10.0, 10.2, 9.9, 10.0),
+        ("2026-08-27 19:59", 10.0, 12.2, 9.9, 12.0),
+        ("2026-08-27 20:00", 12.0, 15.0, 11.8, 14.0),
+        ("2026-08-27 20:01", 14.0, 20.0, 13.9, 19.0),
+    ])
+    result = simulate_long_trade(
+        bars,
+        entry_price=10.0,
+        entry_timestamp=pd.Timestamp("2026-08-27 19:58", tz="America/New_York"),
+        rule=ReplayRule(stop_pct=0.50, target_pct=0.50, max_hold_minutes=10),
+    )
+    assert result.exit_reason == "TIME"
+    assert result.exit_timestamp == pd.Timestamp("2026-08-27 19:59", tz="America/New_York")
+    assert round(result.return_pct, 6) == 0.20
+
+
+def test_same_session_peak_records_exact_elapsed_minutes_and_ignores_post_session_bars():
+    bars = _bars([
+        ("2026-08-27 10:31", 10.0, 10.2, 9.9, 10.1),
+        ("2026-08-27 10:36", 10.1, 12.0, 10.0, 11.8),
+        ("2026-08-27 19:59", 11.8, 11.9, 11.0, 11.2),
+        ("2026-08-27 20:01", 11.2, 15.0, 11.0, 14.5),
+    ])
+    peak = replay.analyze_same_session_peak(
+        bars,
+        entry_price=10.0,
+        entry_timestamp=pd.Timestamp("2026-08-27 10:31", tz="America/New_York"),
+    )
+    assert peak.peak_timestamp == pd.Timestamp("2026-08-27 10:36", tz="America/New_York")
+    assert round(peak.peak_return_pct, 6) == 0.20
+    assert peak.minutes_to_peak == 5
+
+
+def test_replay_grid_preserves_prospective_market_cap_tags_and_peak_metrics():
+    bars = _bars([("2026-08-28 11:01", 10.0, 10.2, 9.9, 10.1), ("2026-08-28 11:03", 10.1, 11.0, 10.0, 10.8)])
     signal = {
         "symbol": "AAA",
         "date": "2026-08-28",
@@ -47,10 +83,14 @@ def test_replay_grid_preserves_prospective_market_cap_tags():
     out = replay_signal_grid(bars, signal, rules=[ReplayRule(stop_pct=0.20, target_pct=0.20, max_hold_minutes=1)])
     assert out.iloc[0]["market_cap_bucket"] == "MICROCAP"
     assert out.iloc[0]["market_cap"] == 75_000_000.0
+    assert round(float(out.iloc[0]["peak_return_pct"]), 6) == 0.10
+    assert out.iloc[0]["minutes_to_peak"] == 2
 
 
-def test_default_rule_grid_includes_wide_variable_stops_through_50_percent():
+def test_default_rule_grid_includes_variable_stops_and_expanded_hold_times():
     rules = default_rule_grid()
     stops = sorted({round(rule.stop_pct, 2) for rule in rules})
+    holds = sorted({rule.max_hold_minutes for rule in rules})
     assert stops == [0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
-    assert len(rules) == 135
+    assert holds == [5, 10, 15, 30, 45, 60, 90, 120, 180, 240]
+    assert len(rules) == 450

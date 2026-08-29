@@ -92,7 +92,7 @@ def simulate_long_trade(
 def default_rule_grid() -> list[ReplayRule]:
     return [
         ReplayRule(stop_pct=s, target_pct=t, max_hold_minutes=h)
-        for s in (0.03, 0.05, 0.07, 0.10)
+        for s in (0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50)
         for t in (0.05, 0.10, 0.15, 0.20, 0.30)
         for h in (30, 60, 120)
     ]

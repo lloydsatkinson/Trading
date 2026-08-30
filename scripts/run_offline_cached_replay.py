@@ -32,15 +32,20 @@ def _read_bars(path: Path) -> pd.DataFrame:
     return df
 
 
-def _daily_prior_close(cache: Path) -> dict[tuple[str, object], float]:
+def _daily_prior_close(cache: Path, allowed_symbols: set[str]) -> dict[tuple[str, object], float]:
     files = sorted(cache.glob("daily_*_sip.csv.gz"))
     if not files:
         return {}
-    frames = [_read_bars(p) for p in files]
-    daily = pd.concat([x for x in frames if not x.empty], ignore_index=True)
-    if daily.empty:
+    frames = []
+    for path in files:
+        x = _read_bars(path)
+        if not x.empty:
+            x = x[x["symbol"].astype(str).isin(allowed_symbols)]
+            if not x.empty:
+                frames.append(x)
+    if not frames:
         return {}
-    daily = daily.drop_duplicates(["symbol", "timestamp"], keep="last")
+    daily = pd.concat(frames, ignore_index=True).drop_duplicates(["symbol", "timestamp"], keep="last")
     x = prepare_intraday_bars(daily).sort_values(["symbol", "timestamp_et"])
     x["prior_close"] = x.groupby("symbol")["close"].shift(1)
     return {
@@ -50,11 +55,14 @@ def _daily_prior_close(cache: Path) -> dict[tuple[str, object], float]:
     }
 
 
-def _opening30_history(cache: Path) -> pd.DataFrame:
+def _opening30_rvol_map(cache: Path, allowed_symbols: set[str], lookback: int = 20) -> dict[tuple[str, str], tuple[float, int]]:
     rows: list[dict[str, Any]] = []
     for path in sorted((cache / "early").glob("*_sip.csv.gz")):
         day = path.name.split("_sip.csv.gz")[0]
         bars = _read_bars(path)
+        if bars.empty:
+            continue
+        bars = bars[bars["symbol"].astype(str).isin(allowed_symbols)]
         if bars.empty:
             continue
         x = prepare_intraday_bars(bars)
@@ -63,32 +71,26 @@ def _opening30_history(cache: Path) -> pd.DataFrame:
         if opening.empty:
             continue
         for symbol, g in opening.groupby("symbol", sort=False):
-            typical = (pd.to_numeric(g["high"], errors="coerce") + pd.to_numeric(g["low"], errors="coerce") + pd.to_numeric(g["close"], errors="coerce")) / 3.0
-            volume = pd.to_numeric(g["volume"], errors="coerce").fillna(0.0)
             rows.append({
                 "symbol": str(symbol),
                 "date": day,
-                "opening30_volume": float(volume.sum()),
-                "opening30_dollar_turnover": float((volume * typical.fillna(g["close"])).sum()),
+                "opening30_volume": float(pd.to_numeric(g["volume"], errors="coerce").fillna(0.0).sum()),
             })
-    return pd.DataFrame(rows)
-
-
-def _rvol_proxy(history: pd.DataFrame, symbol: str, day: str, lookback: int = 20) -> tuple[float | None, int]:
-    if history.empty:
-        return None, 0
-    target = pd.Timestamp(day).date()
-    x = history[history["symbol"].astype(str).eq(str(symbol))].copy()
-    x["date_value"] = pd.to_datetime(x["date"], errors="coerce").dt.date
-    current = x[x["date_value"].eq(target)]
-    prior = x[x["date_value"].lt(target)].sort_values("date_value").tail(lookback)
-    if current.empty or len(prior) < lookback:
-        return None, len(prior)
-    cur = float(pd.to_numeric(current["opening30_volume"], errors="coerce").iloc[-1])
-    med = float(pd.to_numeric(prior["opening30_volume"], errors="coerce").median())
-    if not np.isfinite(cur) or not np.isfinite(med) or med <= 0:
-        return None, len(prior)
-    return cur / med, len(prior)
+    hist = pd.DataFrame(rows)
+    if hist.empty:
+        return {}
+    hist["date_value"] = pd.to_datetime(hist["date"], errors="coerce")
+    hist = hist.sort_values(["symbol", "date_value"]).reset_index(drop=True)
+    hist["prior_median"] = hist.groupby("symbol", sort=False)["opening30_volume"].transform(
+        lambda s: s.shift(1).rolling(lookback, min_periods=lookback).median()
+    )
+    hist["history_n"] = hist.groupby("symbol", sort=False).cumcount().clip(upper=lookback)
+    hist["opening_rvol"] = pd.to_numeric(hist["opening30_volume"], errors="coerce") / pd.to_numeric(hist["prior_median"], errors="coerce")
+    out: dict[tuple[str, str], tuple[float, int]] = {}
+    for r in hist.itertuples():
+        if pd.notna(r.opening_rvol) and np.isfinite(float(r.opening_rvol)) and int(r.history_n) >= lookback:
+            out[(str(r.symbol), str(r.date))] = (float(r.opening_rvol), int(r.history_n))
+    return out
 
 
 def main() -> None:
@@ -107,25 +109,35 @@ def main() -> None:
     if len(dates) < 30:
         raise RuntimeError(f"Need substantial cached history; found only {len(dates)} dates")
 
-    cfg = MultiStrategyConfig()
-    split_map = chronological_split([pd.Timestamp(d).date() for d in dates], cfg.development_sessions, cfg.validation_sessions, cfg.test_sessions)
-    prior_close = _daily_prior_close(cache)
-    opening_history = _opening30_history(cache)
-
-    contexts: list[dict[str, Any]] = []
-    broad_total = 0
-    broad_with_minute = 0
-    baseline_ready = 0
     available_symbols_by_day: dict[str, set[str]] = {}
-
+    cached_symbol_union: set[str] = set()
+    cached_minute_symbol_days = 0
     for minute_path in minute_files:
         day = minute_path.name.split("_sip.csv.gz")[0]
         minute = _read_bars(minute_path)
-        available_symbols_by_day[day] = set(minute["symbol"].astype(str)) if not minute.empty else set()
+        symbols = set(minute["symbol"].astype(str)) if not minute.empty else set()
+        available_symbols_by_day[day] = symbols
+        cached_symbol_union.update(symbols)
+        cached_minute_symbol_days += len(symbols)
+
+    cfg = MultiStrategyConfig()
+    split_map = chronological_split([pd.Timestamp(d).date() for d in dates], cfg.development_sessions, cfg.validation_sessions, cfg.test_sessions)
+    prior_close = _daily_prior_close(cache, cached_symbol_union)
+    rvol_map = _opening30_rvol_map(cache, cached_symbol_union, cfg.opening_baseline_sessions)
+
+    contexts: list[dict[str, Any]] = []
+    restricted_broad_candidates = 0
+    baseline_ready = 0
 
     for path in early_files:
         day = path.name.split("_sip.csv.gz")[0]
+        day_symbols = available_symbols_by_day.get(day, set())
+        if not day_symbols:
+            continue
         bars = _read_bars(path)
+        if bars.empty:
+            continue
+        bars = bars[bars["symbol"].astype(str).isin(day_symbols)]
         if bars.empty:
             continue
         x = prepare_intraday_bars(bars)
@@ -140,14 +152,12 @@ def main() -> None:
             ctx = broad_candidate_context(g, pc, cfg)
             if not ctx.get("broad_candidate"):
                 continue
-            broad_total += 1
-            rvol, history_n = _rvol_proxy(opening_history, symbol, day, cfg.opening_baseline_sessions)
-            if rvol is None:
+            restricted_broad_candidates += 1
+            rvol_info = rvol_map.get((symbol, day))
+            if rvol_info is None:
                 continue
             baseline_ready += 1
-            if symbol not in available_symbols_by_day.get(day, set()):
-                continue
-            broad_with_minute += 1
+            rvol, history_n = rvol_info
             ctx.update({
                 "symbol": symbol,
                 "date": day,
@@ -164,9 +174,11 @@ def main() -> None:
 
     context_df = pd.DataFrame(contexts)
     context_df.to_csv(out / "restricted_candidate_contexts.csv", index=False)
+    print(f"CACHE_CONTEXTS minute_symbol_days={cached_minute_symbol_days} restricted_broad={restricted_broad_candidates} baseline_ready={baseline_ready} contexts={len(context_df)}", flush=True)
 
     signal_frames: list[pd.DataFrame] = []
-    for day, group in context_df.groupby("date", sort=True) if not context_df.empty else []:
+    iterable = context_df.groupby("date", sort=True) if not context_df.empty else []
+    for day, group in iterable:
         minute_path = cache / "minute" / f"{day}_sip.csv.gz"
         minute = _read_bars(minute_path)
         for context in group.to_dict("records"):
@@ -185,6 +197,7 @@ def main() -> None:
 
     signals = pd.concat(signal_frames, ignore_index=True, sort=False) if signal_frames else pd.DataFrame()
     signals.to_csv(out / "signals.csv", index=False)
+    print(f"CACHE_SIGNALS rows={len(signals)}", flush=True)
 
     replays, replay_skips = replay_signals(root, "sip", signals)
     replays.to_csv(out / "replay_grid.csv.gz", index=False, compression="gzip")
@@ -207,9 +220,10 @@ def main() -> None:
         "early_files": len(early_files),
         "minute_files": len(minute_files),
         "dates": len(dates),
-        "broad_candidate_symbol_days": broad_total,
-        "baseline_ready_symbol_days": baseline_ready,
-        "broad_candidates_with_cached_minute_bars": broad_with_minute,
+        "cached_unique_symbols": len(cached_symbol_union),
+        "cached_minute_symbol_days": int(cached_minute_symbol_days),
+        "restricted_broad_candidate_symbol_days": int(restricted_broad_candidates),
+        "baseline_ready_symbol_days": int(baseline_ready),
         "restricted_context_rows": int(len(context_df)),
         "signal_rows": int(len(signals)),
         "replay_rows": int(len(replays)),
@@ -217,14 +231,14 @@ def main() -> None:
     }
     (out / "coverage.json").write_text(json.dumps(coverage, indent=2), encoding="utf-8")
 
-    print("OFFLINE_CACHE_REPLAY_DONE", json.dumps(coverage))
+    print("OFFLINE_CACHE_REPLAY_DONE", json.dumps(coverage), flush=True)
     if not signals.empty:
-        print("SIGNAL_COUNTS")
-        print(signals.groupby(["strategy_id", "variant_id", "direction", "split"]).size().reset_index(name="n").to_string(index=False))
+        print("SIGNAL_COUNTS", flush=True)
+        print(signals.groupby(["strategy_id", "variant_id", "direction", "split"]).size().reset_index(name="n").to_string(index=False), flush=True)
     if not leaderboard.empty:
-        cols = [c for c in ["strategy_id", "variant_id", "direction", "rule_id", "validation_n", "validation_profit_factor", "validation_expectancy", "test_profit_factor", "robustness_score"] if c in leaderboard.columns]
-        print("LEADERBOARD")
-        print(leaderboard[cols].head(20).to_string(index=False))
+        cols = [c for c in ["strategy_id", "variant_id", "direction", "rule_id", "validation_n", "validation_profit_factor", "validation_expectancy", "validation_median_return", "test_profit_factor", "test_expectancy", "robustness_score"] if c in leaderboard.columns]
+        print("LEADERBOARD", flush=True)
+        print(leaderboard[cols].head(25).to_string(index=False), flush=True)
 
 
 if __name__ == "__main__":

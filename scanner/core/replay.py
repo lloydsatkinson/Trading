@@ -8,7 +8,7 @@ import pandas as pd
 
 ET = "America/New_York"
 DEFAULT_SLIPPAGE_BPS = (10, 25, 50, 75, 100)
-DEFAULT_MAX_HOLDS = (5, 10, 15, 30, 45, 60, 90, 120)
+DEFAULT_MAX_HOLDS = (5, 10, 15, 30, 45, 60, 90, 120, 180, 240)
 
 
 def _direction(value: str) -> str:
@@ -23,6 +23,11 @@ def _et_timestamp(value: Any) -> pd.Timestamp:
     if ts.tzinfo is None:
         return ts.tz_localize(ET)
     return ts.tz_convert(ET)
+
+
+def _session_cap(entry_ts: pd.Timestamp, session_end: str) -> pd.Timestamp:
+    hour, minute = [int(part) for part in session_end.split(":", 1)]
+    return entry_ts.normalize() + pd.Timedelta(hours=hour, minutes=minute)
 
 
 def raw_return_pct(entry_price: float, exit_price: float, direction: str) -> float:
@@ -144,16 +149,14 @@ def simulate_trade(
         return ReplayResult("NO_DATA", None, np.nan, np.nan, 0)
     x = _prepare_bars(bars)
     entry_ts = _et_timestamp(entry_timestamp)
-    x = x[x["timestamp_et"] >= entry_ts].copy()
+    session_cap = _session_cap(entry_ts, session_end)
+    x = x[(x["timestamp_et"] >= entry_ts) & (x["timestamp_et"] < session_cap)].copy()
     if rule.hold_to_eod:
-        hour, minute = [int(part) for part in session_end.split(":", 1)]
-        end_ts = entry_ts.normalize() + pd.Timedelta(hours=hour, minutes=minute)
-        x = x[x["timestamp_et"] <= end_ts]
         terminal_reason = "EOD"
     else:
         if rule.max_hold_minutes is None or rule.max_hold_minutes <= 0:
             raise ValueError("max_hold_minutes must be positive unless hold_to_eod is true")
-        end_ts = entry_ts + pd.Timedelta(minutes=rule.max_hold_minutes)
+        end_ts = min(entry_ts + pd.Timedelta(minutes=rule.max_hold_minutes), session_cap)
         x = x[x["timestamp_et"] <= end_ts]
         terminal_reason = "TIME"
     if x.empty:

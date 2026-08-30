@@ -1,0 +1,32 @@
+name: Offline ORB Decomposition
+
+on:
+  push:
+    branches:
+      - offline-orb-decompose
+
+jobs:
+  decompose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore existing SerClick cache only
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache/serclick_alpaca
+          key: offline-orb-decompose-no-save-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            serclick-60d-${{ runner.os }}-
+            serclick-daily-${{ runner.os }}-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile decomposition
+        run: python -m py_compile scripts/run_offline_orb_decomposition.py
+      - name: Run ORB decomposition with HTTP blocked in process
+        run: python scripts/run_offline_orb_decomposition.py

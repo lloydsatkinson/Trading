@@ -61,3 +61,12 @@ def test_ranker_keeps_test_and_forward_as_reporting_only_columns():
     assert row["validation_profit_factor"] == 1.6
     assert row["test_profit_factor"] == 1.4
     assert row["forward_profit_factor"] == 1.3
+
+
+def test_ranker_carries_selected_rule_metadata():
+    row = _row("ORB", "A", "validation", 1.6, 0.02)
+    row.update({"max_hold_minutes": 60, "stop_pct": 0.05, "target_pct": 0.10, "hold_to_eod": False})
+    ranked = rank_strategies(pd.DataFrame([row]), min_n=20)
+    assert ranked.iloc[0]["max_hold_minutes"] == 60
+    assert ranked.iloc[0]["stop_pct"] == 0.05
+    assert ranked.iloc[0]["target_pct"] == 0.10

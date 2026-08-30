@@ -7,9 +7,6 @@ on:
         description: Number of completed trading sessions
         required: false
         default: "60"
-  push:
-    branches:
-      - serclick-expanded-replay-run-20260830
   schedule:
     - cron: "0 6 * * 6"
 

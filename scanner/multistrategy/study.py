@@ -25,13 +25,23 @@ def _chunks(items: list[str], n: int) -> Iterable[list[str]]:
         yield items[i:i + n]
 
 
-def _safe_symbol(symbol: str) -> bool:
+def _safe_symbol(symbol) -> bool:
+    if not isinstance(symbol, str):
+        return False
+    symbol = symbol.strip()
     if not symbol or len(symbol) > 8:
         return False
     upper = symbol.upper()
     if len(upper) >= 5 and any(upper.endswith(suffix) for suffix in ("W", "WS", "WT", "U", "R")):
         return False
     return True
+
+
+def _opening_history_start(day: date | str, lookback_sessions: int = 20) -> date:
+    """Give the first research day enough prior calendar room for a full RVOL baseline."""
+    target = pd.Timestamp(day).date()
+    calendar_days = max(60, int(lookback_sessions) * 4)
+    return target - timedelta(days=calendar_days)
 
 
 def _bar_dollar(x: pd.DataFrame) -> pd.Series:
@@ -189,10 +199,13 @@ class MultiStrategyStudy:
             df.to_csv(cache, index=False)
         if df.empty:
             return df
-        df["symbol"] = df["symbol"].astype(str).str.upper()
+        if "symbol" not in df.columns:
+            return df.iloc[0:0].copy()
+        df = df[df["symbol"].map(_safe_symbol)].copy()
+        df["symbol"] = df["symbol"].map(lambda value: value.strip().upper())
         if "exchange" in df.columns:
             df = df[df["exchange"].astype(str).str.upper().isin({"NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"})]
-        return df[df["symbol"].map(_safe_symbol)].drop_duplicates("symbol").reset_index(drop=True)
+        return df.drop_duplicates("symbol").reset_index(drop=True)
 
     def _daily_bars(self, symbols: list[str], sessions: list[date]) -> pd.DataFrame:
         cache = self.paths.cache / f"daily_{sessions[0]}_{sessions[-1]}_{self.feed}.csv.gz"
@@ -248,10 +261,9 @@ class MultiStrategyStudy:
     def _fetch_opening_history(self, symbols: list[str], sessions: list[date], through_day: date) -> pd.DataFrame:
         if not symbols:
             return pd.DataFrame(columns=["symbol", "date", "opening5_volume", "opening5_dollar_turnover"])
-        history_sessions = [d for d in sessions if d <= through_day]
-        if not history_sessions:
+        if not sessions:
             return pd.DataFrame()
-        start_day = history_sessions[max(0, len(history_sessions) - self.cfg.opening_baseline_sessions - 1)]
+        start_day = _opening_history_start(sessions[0], self.cfg.opening_baseline_sessions)
         digest = hashlib.sha1("\n".join(sorted(symbols)).encode("utf-8")).hexdigest()[:12]
         key = f"{start_day}_{through_day}_{self.feed}_{digest}.csv.gz"
         cache = self.paths.cache / "opening5" / key

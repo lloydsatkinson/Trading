@@ -52,7 +52,11 @@ def _split_metric(summary: pd.DataFrame, split: str, key: tuple, baseline_slippa
             x["_slip_dist"] = (pd.to_numeric(x["slippage_bps"], errors="coerce") - float(baseline_slippage_bps)).abs()
             x = x.sort_values("_slip_dist").head(1)
     row = x.iloc[0]
-    return {name: row.get(name) for name in ("n", "profit_factor", "expectancy", "median_return", "max_drawdown")}
+    fields = (
+        "n", "profit_factor", "expectancy", "median_return", "max_drawdown",
+        "stop_pct", "target_pct", "max_hold_minutes", "target_r_multiple", "hold_to_eod",
+    )
+    return {name: row.get(name) for name in fields if name in row.index}
 
 
 def rank_strategies(
@@ -135,6 +139,9 @@ def rank_strategies(
             "slippage_component": slippage_score,
             "robustness_score": float(robustness_score),
         }
+        for field in ("stop_pct", "target_pct", "max_hold_minutes", "target_r_multiple", "hold_to_eod"):
+            if field in validation:
+                row[field] = validation.get(field)
         for split in ("development", "test", "forward"):
             metrics = _split_metric(x, split, key, baseline_slippage_bps)
             row[f"{split}_n"] = int(_num(metrics.get("n"), 0)) if metrics else 0

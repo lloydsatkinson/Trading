@@ -1,0 +1,36 @@
+name: Offline Cached Strategy Scout
+
+on:
+  push:
+    branches:
+      - offline-cache-scout
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: .
+
+jobs:
+  offline-scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Restore existing SerClick cache only
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache/serclick_alpaca
+          key: offline-scout-no-save-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            serclick-60d-${{ runner.os }}-
+            serclick-daily-${{ runner.os }}-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile scout
+        run: python -m py_compile scripts/run_offline_cached_scout.py
+      - name: Run cached fixed-horizon scout with HTTP blocked
+        run: python scripts/run_offline_cached_scout.py

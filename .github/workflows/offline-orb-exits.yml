@@ -1,0 +1,32 @@
+name: Offline ORB Exit Search
+
+on:
+  push:
+    branches:
+      - offline-orb-exits
+
+jobs:
+  exits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore existing SerClick cache only
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache/serclick_alpaca
+          key: offline-orb-exits-no-save-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            serclick-60d-${{ runner.os }}-
+            serclick-daily-${{ runner.os }}-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile exit search
+        run: python -m py_compile scripts/run_offline_orb_exit_search.py
+      - name: Run focused exit search with HTTP blocked in process
+        run: python scripts/run_offline_orb_exit_search.py

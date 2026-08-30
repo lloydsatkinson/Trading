@@ -1,4 +1,5 @@
-from scanner.core.rules import common_percentage_rules, structural_r_rules, MAX_HOLD_MINUTES
+from scanner.core.rules import common_percentage_rules, structural_r_rules, rule_family_id, MAX_HOLD_MINUTES
+from scanner.core.replay import ReplayRule
 
 
 def test_max_hold_grid_extends_to_240_minutes():
@@ -18,3 +19,9 @@ def test_structural_r_rules_use_signal_stop_reference():
         (9.5, 1.0, 30),
         (9.5, 2.0, 30),
     ]
+
+
+def test_structural_rule_family_id_does_not_fragment_by_actual_stop_price():
+    a = ReplayRule(stop_price=9.5, target_r_multiple=2.0, max_hold_minutes=60)
+    b = ReplayRule(stop_price=4.2, target_r_multiple=2.0, max_hold_minutes=60)
+    assert rule_family_id(a) == rule_family_id(b) == "SSTRUCT_R2_H60"

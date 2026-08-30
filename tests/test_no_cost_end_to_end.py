@@ -71,12 +71,17 @@ class _FakeStudy:
         }
 
 
+def _blocked_http(*args, **kwargs):
+    raise AssertionError("API-free smoke test attempted an HTTP request")
+
+
 def test_api_free_runner_executes_real_orb_replay_and_writes_artifacts(tmp_path, monkeypatch):
     cache = tmp_path / "data" / "cache" / "multistrategy_alpaca" / "minute"
     cache.mkdir(parents=True)
     _minute_bars().to_csv(cache / "2026-08-28_sip.csv.gz", index=False, compression="gzip")
 
     monkeypatch.setattr(runner, "MultiStrategyStudy", _FakeStudy)
+    monkeypatch.setattr("requests.sessions.Session.request", _blocked_http)
 
     result = runner.run_research(
         root=tmp_path,

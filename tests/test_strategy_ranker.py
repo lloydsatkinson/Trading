@@ -84,3 +84,13 @@ def test_infinite_profit_factor_saturates_score_instead_of_being_treated_as_zero
     finite = ranked[ranked["rule_id"].eq("FINITE")].iloc[0]
     assert no_losses["pf_component"] == 1.0
     assert no_losses["robustness_score"] > finite["robustness_score"]
+
+
+def test_ranker_marks_only_10pct_plus_validation_expectancy_as_production_eligible():
+    summary = pd.DataFrame([
+        _row("LEO", "BELOW_HURDLE", "validation", 2.0, 0.099, n=30),
+        _row("LEO", "MEETS_HURDLE", "validation", 2.0, 0.100, n=30),
+    ])
+    ranked = rank_strategies(summary, min_n=20, production_min_expectancy=0.10)
+    eligibility = dict(zip(ranked["rule_id"], ranked["production_eligible"]))
+    assert eligibility == {"BELOW_HURDLE": False, "MEETS_HURDLE": True}

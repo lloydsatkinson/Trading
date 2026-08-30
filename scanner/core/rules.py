@@ -62,3 +62,19 @@ def structural_r_rules(
 def default_rules_for_signal(signal: dict, serclick: bool = False) -> list[ReplayRule]:
     stops = SERCLICK_STOP_PCTS if serclick else DEFAULT_STOP_PCTS
     return common_percentage_rules(stop_pcts=stops) + structural_r_rules(signal)
+
+
+def rule_family_id(rule: ReplayRule) -> str:
+    """Return an aggregatable rule identity independent of a signal's price."""
+    if rule.stop_price is not None:
+        stop = "SSTRUCT"
+    else:
+        stop = f"S{int(round(float(rule.stop_pct or 0.0) * 100)):02d}"
+    if rule.target_r_multiple is not None:
+        target = f"R{float(rule.target_r_multiple):g}"
+    elif rule.target_price is not None:
+        target = "TSTRUCT"
+    else:
+        target = f"T{int(round(float(rule.target_pct or 0.0) * 100)):02d}"
+    hold = "EOD" if rule.hold_to_eod else f"H{int(rule.max_hold_minutes)}"
+    return f"{stop}_{target}_{hold}"

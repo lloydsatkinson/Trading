@@ -83,7 +83,7 @@ def test_short_replay_records_mfe_and_mae():
     assert round(result.mae_pct, 4) == -0.02
 
 
-def test_eod_hold_uses_session_end_not_next_day():
+def test_eod_hold_uses_last_bar_before_session_end_not_next_day():
     bars = bars_at([
         ("2026-08-28 15:59", 10.0, 10.1, 9.9, 10.0),
         ("2026-08-28 16:00", 10.0, 10.2, 9.9, 10.1),
@@ -95,4 +95,18 @@ def test_eod_hold_uses_session_end_not_next_day():
         session_end="16:00",
     )
     assert result.exit_reason == "EOD"
-    assert str(result.exit_timestamp.date()) == "2026-08-28"
+    assert result.exit_timestamp.hour == 15 and result.exit_timestamp.minute == 59
+
+
+def test_non_eod_hold_is_still_capped_at_session_end():
+    bars = bars_at([
+        ("2026-08-28 15:59", 10.0, 10.1, 9.9, 10.0),
+        ("2026-08-28 16:30", 10.0, 20.0, 9.9, 19.0),
+    ])
+    result = simulate_trade(
+        bars, 10.0, "2026-08-28 15:59:00-04:00", "LONG",
+        ReplayRule(stop_pct=0.50, target_pct=0.50, max_hold_minutes=240),
+        session_end="16:00",
+    )
+    assert result.exit_reason == "TIME"
+    assert result.exit_timestamp.hour == 15 and result.exit_timestamp.minute == 59

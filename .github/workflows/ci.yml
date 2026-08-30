@@ -28,6 +28,10 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Check dependency consistency
+        run: pip check
+      - name: Smoke research CLI imports
+        run: python scripts/run_strategy_research.py --help
       - name: Run tests
         run: pytest -q
       - name: Compile Python

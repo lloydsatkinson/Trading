@@ -1,6 +1,12 @@
+import numpy as np
 import pandas as pd
 
-from scanner.multistrategy.study import broad_candidate_context, opening_baseline_for_day
+from scanner.multistrategy.study import (
+    _opening_history_start,
+    _safe_symbol,
+    broad_candidate_context,
+    opening_baseline_for_day,
+)
 
 
 def early_bars(rows):
@@ -78,3 +84,16 @@ def test_missing_optional_float_and_news_are_explicit_unknowns():
     ctx = broad_candidate_context(bars, prior_close=4.0)
     assert ctx["float_shares"] is None
     assert ctx["catalyst_class"] == "UNKNOWN"
+
+
+def test_safe_symbol_rejects_missing_non_string_and_nan_values():
+    assert _safe_symbol(np.nan) is False
+    assert _safe_symbol(None) is False
+    assert _safe_symbol(123.0) is False
+    assert _safe_symbol(" ABCD ") is True
+
+
+def test_opening_history_starts_before_research_day_for_full_rvol_baseline():
+    start = _opening_history_start("2026-06-03", lookback_sessions=20)
+    assert start < pd.Timestamp("2026-06-03").date()
+    assert (pd.Timestamp("2026-06-03").date() - start).days >= 60

@@ -1,0 +1,32 @@
+name: Offline ORB Execution Stress
+
+on:
+  push:
+    branches:
+      - offline-orb-execution-stress
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore existing cache only
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache/serclick_alpaca
+          key: offline-orb-execution-stress-no-save-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            serclick-60d-${{ runner.os }}-
+            serclick-daily-${{ runner.os }}-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile research stress
+        run: python -m py_compile scripts/run_offline_orb_execution_stress.py
+      - name: Run cached historical stress with HTTP blocked
+        run: python scripts/run_offline_orb_execution_stress.py

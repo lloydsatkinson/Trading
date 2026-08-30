@@ -1,0 +1,45 @@
+name: Offline Explosive Fast Scout
+
+on:
+  push:
+    branches: [offline-explosive-fast-scout]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONPATH: .
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore existing SerClick cache only
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache/serclick_alpaca
+          key: offline-explosive-fast-no-save-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            serclick-60d-${{ runner.os }}-
+            serclick-daily-${{ runner.os }}-
+      - name: Download retained 60-day result artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data/offline_prior_artifact
+          curl -fL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/lloydsatkinson/Trading/actions/artifacts/9711723047/zip" -o /tmp/serclick-prior.zip
+          unzip -q /tmp/serclick-prior.zip -d data/offline_prior_artifact
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile scout
+        run: python -m py_compile scripts/run_offline_explosive_fast_scout.py
+      - name: Run fast historical scout with market-data HTTP blocked
+        run: python scripts/run_offline_explosive_fast_scout.py

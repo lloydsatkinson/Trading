@@ -3,6 +3,7 @@ name: Python CI
 on:
   push:
     branches:
+      - main
       - serclick-remote-research-v1
       - multistrategy-microcap-research-v1
   pull_request:

@@ -73,11 +73,15 @@ def rank_strategies(
     summary: pd.DataFrame,
     min_n: int = 20,
     baseline_slippage_bps: float = 25.0,
+    production_min_expectancy: float = 0.10,
 ) -> pd.DataFrame:
     """Rank fixed strategy/rule identities using validation data only.
 
     Test and forward metrics are joined after the selection score is computed so
-    they can be inspected without influencing rule choice.
+    they can be inspected without influencing rule choice. Research candidates
+    remain visible even when they fail the production hurdle; production_eligible
+    requires validation expectancy to meet production_min_expectancy at the
+    baseline slippage assumption.
     """
     if summary.empty:
         return pd.DataFrame()
@@ -127,6 +131,7 @@ def rank_strategies(
             + 0.10 * drawdown_component
             + 0.10 * slippage_score
         )
+        production_eligible = bool(expectancy >= float(production_min_expectancy))
 
         row = {
             "strategy_id": strategy_id,
@@ -135,6 +140,8 @@ def rank_strategies(
             "rule_id": rule_id,
             "selection_split": "validation",
             "baseline_slippage_bps": float(baseline_slippage_bps),
+            "production_min_expectancy": float(production_min_expectancy),
+            "production_eligible": production_eligible,
             "validation_n": n,
             "validation_profit_factor": pf,
             "validation_expectancy": expectancy,
@@ -162,6 +169,6 @@ def rank_strategies(
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values(
-        ["robustness_score", "validation_profit_factor", "validation_expectancy", "validation_n"],
-        ascending=[False, False, False, False],
+        ["production_eligible", "robustness_score", "validation_profit_factor", "validation_expectancy", "validation_n"],
+        ascending=[False, False, False, False, False],
     ).reset_index(drop=True)

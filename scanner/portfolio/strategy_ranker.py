@@ -14,6 +14,16 @@ def _num(value, default=np.nan) -> float:
     return out if np.isfinite(out) else float(default)
 
 
+def _profit_factor_num(value, default=np.nan) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if np.isnan(out) or out == -np.inf:
+        return float(default)
+    return out
+
+
 def _clip01(value: float) -> float:
     return float(np.clip(value, 0.0, 1.0))
 
@@ -99,12 +109,12 @@ def rank_strategies(
         ]
         slippage_score, last_profitable_bps = _slippage_component(validation_all_slippage)
 
-        pf = _num(validation.get("profit_factor"), 0.0)
+        pf = _profit_factor_num(validation.get("profit_factor"), 0.0)
         expectancy = _num(validation.get("expectancy"), -1.0)
         median = _num(validation.get("median_return"), 0.0)
         drawdown = _num(validation.get("max_drawdown"), -1.0)
 
-        pf_component = _clip01((pf - 1.0) / 1.5)
+        pf_component = 1.0 if pf == np.inf else _clip01((pf - 1.0) / 1.5)
         expectancy_component = _clip01((expectancy + 0.005) / 0.055)
         sample_component = _clip01(math.log1p(n) / math.log1p(100))
         median_component = _clip01((median + 0.005) / 0.035)
@@ -145,7 +155,7 @@ def rank_strategies(
         for split in ("development", "test", "forward"):
             metrics = _split_metric(x, split, key, baseline_slippage_bps)
             row[f"{split}_n"] = int(_num(metrics.get("n"), 0)) if metrics else 0
-            row[f"{split}_profit_factor"] = _num(metrics.get("profit_factor")) if metrics else np.nan
+            row[f"{split}_profit_factor"] = _profit_factor_num(metrics.get("profit_factor")) if metrics else np.nan
             row[f"{split}_expectancy"] = _num(metrics.get("expectancy")) if metrics else np.nan
         rows.append(row)
 

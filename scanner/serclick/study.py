@@ -32,7 +32,10 @@ def _chunks(items: list[str], n: int):
         yield items[i:i + n]
 
 
-def _safe_symbol(s: str) -> bool:
+def _safe_symbol(s) -> bool:
+    if not isinstance(s, str):
+        return False
+    s = s.strip()
     if not s or len(s) > 8:
         return False
     u = s.upper()

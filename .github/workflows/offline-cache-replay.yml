@@ -1,0 +1,78 @@
+name: Offline Cached Strategy Replay
+
+on:
+  push:
+    branches:
+      - offline-cache-replay
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: .
+
+jobs:
+  offline-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore existing SerClick market-data cache only
+        id: market-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache/serclick_alpaca
+          key: offline-replay-no-save-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            serclick-60d-${{ runner.os }}-
+            serclick-daily-${{ runner.os }}-
+
+      - name: Show restored cache coverage
+        shell: bash
+        run: |
+          echo "cache-hit=${{ steps.market-cache.outputs.cache-hit }}"
+          find data/cache/serclick_alpaca -type f 2>/dev/null | sort | sed -n '1,25p'
+          echo "early_files=$(find data/cache/serclick_alpaca/early -type f -name '*_sip.csv.gz' 2>/dev/null | wc -l)"
+          echo "minute_files=$(find data/cache/serclick_alpaca/minute -type f -name '*_sip.csv.gz' 2>/dev/null | wc -l)"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile offline replay
+        run: python -m py_compile scripts/run_offline_cached_replay.py
+
+      - name: Run real cached-data replay with HTTP blocked in process
+        run: python scripts/run_offline_cached_replay.py
+
+      - name: Print coverage and top outputs
+        if: always()
+        shell: bash
+        run: |
+          echo '--- COVERAGE ---'
+          cat data/offline_cached_replay/coverage.json 2>/dev/null || true
+          echo '--- SIGNALS ---'
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+          p=Path('data/offline_cached_replay/signals.csv')
+          if p.exists() and p.stat().st_size:
+              x=pd.read_csv(p)
+              if len(x): print(x.groupby(['strategy_id','variant_id','direction','split']).size().reset_index(name='n').to_string(index=False))
+          PY
+          echo '--- LEADERBOARD TOP 25 ---'
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+          p=Path('data/offline_cached_replay/leaderboard.csv')
+          if p.exists() and p.stat().st_size:
+              x=pd.read_csv(p)
+              cols=[c for c in ['strategy_id','variant_id','direction','rule_id','validation_n','validation_profit_factor','validation_expectancy','validation_median_return','test_profit_factor','test_expectancy','robustness_score'] if c in x.columns]
+              if len(x): print(x[cols].head(25).to_string(index=False))
+          PY

@@ -37,7 +37,10 @@ def adapt_serclick_ignitions(ignitions: pd.DataFrame) -> pd.DataFrame:
         window = str(base.get("ignition_window") or "UNKNOWN")
         signal_timestamp = base.get("timestamp_et", base.get("timestamp"))
         entry_timestamp = base.get("entry_timestamp")
-        raw_entry = float(base["entry_price_raw"])
+        raw_value = base.get("entry_price_raw", base.get("entry_raw_open"))
+        if raw_value is None:
+            raise ValueError("SerClick ignition missing entry_price_raw/entry_raw_open")
+        raw_entry = float(raw_value)
         slipped_entry = float(base["entry_price_slipped"])
         cap = _number(base.get("market_cap"))
         float_shares = _number(base.get("float_shares"))

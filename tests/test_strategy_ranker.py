@@ -1,3 +1,5 @@
+import math
+
 import pandas as pd
 
 from scanner.portfolio.strategy_ranker import rank_strategies
@@ -70,3 +72,15 @@ def test_ranker_carries_selected_rule_metadata():
     assert ranked.iloc[0]["max_hold_minutes"] == 60
     assert ranked.iloc[0]["stop_pct"] == 0.05
     assert ranked.iloc[0]["target_pct"] == 0.10
+
+
+def test_infinite_profit_factor_saturates_score_instead_of_being_treated_as_zero():
+    summary = pd.DataFrame([
+        _row("ORB", "NO_LOSSES", "validation", math.inf, 0.025, n=30),
+        _row("ORB", "FINITE", "validation", 1.5, 0.025, n=30),
+    ])
+    ranked = rank_strategies(summary, min_n=20)
+    no_losses = ranked[ranked["rule_id"].eq("NO_LOSSES")].iloc[0]
+    finite = ranked[ranked["rule_id"].eq("FINITE")].iloc[0]
+    assert no_losses["pf_component"] == 1.0
+    assert no_losses["robustness_score"] > finite["robustness_score"]

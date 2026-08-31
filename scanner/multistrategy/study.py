@@ -46,6 +46,15 @@ def _opening_history_start(day: date | str, lookback_sessions: int = 20) -> date
     return target - timedelta(days=calendar_days)
 
 
+def _split_end_dates(split_map: dict[date, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for day, split in split_map.items():
+        current = out.get(str(split))
+        if current is None or day > pd.Timestamp(current).date():
+            out[str(split)] = str(day)
+    return out
+
+
 def _bar_dollar(x: pd.DataFrame) -> pd.Series:
     typical = (x["high"] + x["low"] + x["close"]) / 3.0
     if "vwap" in x.columns:
@@ -354,7 +363,7 @@ class MultiStrategyStudy:
         out.to_csv(cache, index=False, compression="gzip")
         return out
 
-    def run(self) -> dict[str, Any]:
+    def run(self, include_dan_candidates: bool = False) -> dict[str, Any]:
         sessions = self._completed_sessions()
         split_map = chronological_split(sessions, self.cfg.development_sessions, self.cfg.validation_sessions, self.cfg.test_sessions)
         assets = self._assets()
@@ -362,57 +371,76 @@ class MultiStrategyStudy:
         daily = self._daily_bars(symbols, sessions)
         prior_close = self._prior_close_map(daily)
         contexts: list[dict[str, Any]] = []
+        dan_contexts: list[dict[str, Any]] = []
         minute_files: list[str] = []
+
         for day in sessions:
             early = self._fetch_early_day(symbols, day)
             if early.empty:
                 continue
             early = prepare_intraday_bars(early)
             day_contexts: list[dict[str, Any]] = []
+            day_dan_contexts: list[dict[str, Any]] = []
+
             for symbol, group in early.groupby("symbol", sort=False):
                 pc = prior_close.get((str(symbol), day))
                 if pc is None:
                     continue
-                ctx = broad_candidate_context(group, pc, self.cfg)
-                if not ctx.get("broad_candidate"):
-                    continue
-                ctx.update({"symbol": str(symbol), "date": str(day), "split": split_map[day], "feed": self.feed.upper()})
-                day_contexts.append(ctx)
-            if not day_contexts:
+                common = {"symbol": str(symbol), "date": str(day), "split": split_map[day], "feed": self.feed.upper()}
+
+                broad = broad_candidate_context(group, pc, self.cfg)
+                if broad.get("broad_candidate"):
+                    broad.update(common)
+                    day_contexts.append(broad)
+
+                if include_dan_candidates:
+                    dan = dan_candidate_context(group, pc)
+                    if dan.get("dan_candidate"):
+                        dan.update(common)
+                        day_dan_contexts.append(dan)
+
+            all_day_contexts = day_contexts + day_dan_contexts
+            if not all_day_contexts:
                 continue
+
             from scanner.serclick.marketcap import load_or_fetch_market_cap_snapshot
             snapshot = load_or_fetch_market_cap_snapshot(self.paths.root, day)
             cap_map = {}
             if snapshot is not None and not snapshot.empty:
                 for record in snapshot.to_dict("records"):
                     cap_map[str(record.get("symbol", "")).upper()] = record
-            for ctx in day_contexts:
+            for ctx in all_day_contexts:
                 cap_row = cap_map.get(str(ctx["symbol"]).upper(), {})
                 cap = cap_row.get("market_cap", np.nan)
                 ctx["market_cap"] = cap
                 ctx["market_cap_bucket"] = market_cap_bucket(cap)
                 ctx["market_cap_source"] = cap_row.get("market_cap_source")
                 ctx["market_cap_asof"] = cap_row.get("market_cap_asof")
-            candidate_symbols = sorted({str(row["symbol"]) for row in day_contexts})
+
+            candidate_symbols = sorted({str(row["symbol"]) for row in all_day_contexts})
             opening_history = self._fetch_opening_history(candidate_symbols, sessions, day)
-            minute = self._fetch_minute_day(candidate_symbols, day)
+            minute = self.ensure_minute_day(candidate_symbols, day)
             minute_cache = self.paths.cache / "minute" / f"{day}_{self.feed}.csv.gz"
             minute_files.append(str(minute_cache))
-            for ctx in day_contexts:
-                symbol = str(ctx["symbol"])
-                symbol_bars = minute[minute["symbol"].astype(str).eq(symbol)].copy() if not minute.empty else pd.DataFrame()
-                current = opening5_row(symbol_bars, symbol, day) if not symbol_bars.empty else {"opening5_volume": np.nan, "opening5_dollar_turnover": np.nan}
-                baseline = opening_baseline_for_day(opening_history, symbol, day, self.cfg.opening_baseline_sessions)
-                median_volume = baseline["median_opening5_volume"]
-                ctx.update(current)
-                ctx.update(baseline)
-                ctx["opening_rvol"] = float(current["opening5_volume"] / median_volume) if np.isfinite(current["opening5_volume"]) and np.isfinite(median_volume) and median_volume > 0 else np.nan
-                contexts.append(ctx)
+
+            for target, day_rows in ((contexts, day_contexts), (dan_contexts, day_dan_contexts)):
+                for ctx in day_rows:
+                    symbol = str(ctx["symbol"])
+                    symbol_bars = minute[minute["symbol"].astype(str).eq(symbol)].copy() if not minute.empty else pd.DataFrame()
+                    current = opening5_row(symbol_bars, symbol, day) if not symbol_bars.empty else {"opening5_volume": np.nan, "opening5_dollar_turnover": np.nan}
+                    baseline = opening_baseline_for_day(opening_history, symbol, day, self.cfg.opening_baseline_sessions)
+                    median_volume = baseline["median_opening5_volume"]
+                    ctx.update(current)
+                    ctx.update(baseline)
+                    ctx["opening_rvol"] = float(current["opening5_volume"] / median_volume) if np.isfinite(current["opening5_volume"]) and np.isfinite(median_volume) and median_volume > 0 else np.nan
+                    target.append(ctx)
+
         output_dir = self.paths.output / self.run_id
         output_dir.mkdir(parents=True, exist_ok=True)
         context_df = pd.DataFrame(contexts)
         context_df.to_csv(output_dir / "candidate_contexts.csv", index=False)
-        return {
+
+        result = {
             "run_id": self.run_id,
             "feed": self.feed.upper(),
             "sessions": len(sessions),
@@ -422,3 +450,12 @@ class MultiStrategyStudy:
             "minute_files": minute_files,
             "output_dir": str(output_dir),
         }
+        if include_dan_candidates:
+            dan_df = pd.DataFrame(dan_contexts)
+            dan_df.to_csv(output_dir / "dan_candidate_contexts.csv", index=False)
+            result.update({
+                "dan_candidate_contexts": dan_df,
+                "daily_bars": daily,
+                "split_end_dates": _split_end_dates(split_map),
+            })
+        return result

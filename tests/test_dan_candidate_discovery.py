@@ -1,4 +1,5 @@
 import json
+from datetime import date
 
 import pandas as pd
 
@@ -7,10 +8,10 @@ from scanner.multistrategy.study import MultiStrategyStudy, broad_candidate_cont
 from scanner.strategies.dan_irish.config import DanConfig
 
 
-def early_bars(rows):
+def early_bars(rows, symbol="AAA"):
     return pd.DataFrame([
         {
-            "symbol": "AAA",
+            "symbol": symbol,
             "timestamp": pd.Timestamp(ts, tz="America/New_York").tz_convert("UTC"),
             "open": o,
             "high": h,
@@ -81,3 +82,50 @@ def test_ensure_minute_day_fetches_only_symbols_missing_from_manifest(tmp_path):
     assert fake.calls == [["BBB"]]
     assert set(out["symbol"]) == {"AAA", "BBB"}
     assert set(json.loads(manifest.read_text(encoding="utf-8"))) == {"AAA", "BBB"}
+
+
+def test_native_study_returns_separate_dan_contexts_and_fetches_union_once(tmp_path, monkeypatch):
+    study = MultiStrategyStudy(root=tmp_path, feed="sip", sessions=1)
+    day = date(2026, 8, 28)
+    monkeypatch.setattr(study, "_completed_sessions", lambda: [day])
+    monkeypatch.setattr(study, "_assets", lambda: pd.DataFrame({"symbol": ["AAA", "BBB"]}))
+
+    daily = pd.concat([
+        early_bars([("2026-08-27 16:00", 4.0, 4.0, 4.0, 4.0, 1000, 4.0)], symbol="AAA"),
+        early_bars([("2026-08-27 16:00", 100.0, 100.0, 100.0, 100.0, 1000, 100.0)], symbol="BBB"),
+    ], ignore_index=True)
+    monkeypatch.setattr(study, "_daily_bars", lambda symbols, sessions: daily.copy())
+    monkeypatch.setattr(study, "_prior_close_map", lambda frame: {("AAA", day): 4.0, ("BBB", day): 100.0})
+
+    early = pd.concat([
+        early_bars([
+            ("2026-08-28 08:00", 4.30, 4.40, 4.25, 4.40, 300_000, 4.35),
+            ("2026-08-28 09:30", 4.40, 4.45, 4.38, 4.42, 100_000, 4.41),
+        ], symbol="AAA"),
+        early_bars([
+            ("2026-08-28 08:00", 120.0, 125.0, 119.0, 124.0, 10_000, 122.0),
+            ("2026-08-28 09:30", 124.0, 126.0, 123.0, 125.0, 5_000, 125.0),
+        ], symbol="BBB"),
+    ], ignore_index=True)
+    monkeypatch.setattr(study, "_fetch_early_day", lambda symbols, session: early.copy())
+    monkeypatch.setattr(study, "_fetch_opening_history", lambda symbols, sessions, through_day: pd.DataFrame())
+    monkeypatch.setattr("scanner.serclick.marketcap.load_or_fetch_market_cap_snapshot", lambda root, session: pd.DataFrame())
+
+    union_calls = []
+
+    def ensure_union(symbols, session):
+        union_calls.append(tuple(sorted(symbols)))
+        return pd.concat([
+            early_bars([("2026-08-28 09:30", 4.40, 4.45, 4.38, 4.42, 100_000, 4.41)], symbol="AAA"),
+            early_bars([("2026-08-28 09:30", 124.0, 126.0, 123.0, 125.0, 5_000, 125.0)], symbol="BBB"),
+        ], ignore_index=True)
+
+    monkeypatch.setattr(study, "ensure_minute_day", ensure_union)
+
+    meta = study.run(include_dan_candidates=True)
+
+    assert set(meta["candidate_contexts"]["symbol"]) == {"AAA"}
+    assert set(meta["dan_candidate_contexts"]["symbol"]) == {"BBB"}
+    assert union_calls == [("AAA", "BBB")]
+    assert meta["daily_bars"].equals(daily)
+    assert meta["split_end_dates"] == {"development": "2026-08-28"}

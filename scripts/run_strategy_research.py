@@ -476,6 +476,7 @@ def run_research(
     meta = {
         "run_id": run_id,
         "feed": feed.upper(),
+        "market_data_adjustment": "raw",
         "requested_sessions": int(sessions),
         "strategies": sorted(selected),
         "start_date": min(start_dates) if start_dates else None,

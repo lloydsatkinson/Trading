@@ -9,9 +9,15 @@ import pandas as pd
 
 from scanner.core.multisession_replay import replay_swing_signal_grid
 from scanner.core.replay import DEFAULT_SLIPPAGE_BPS, apply_entry_slippage
-from scanner.core.reporting import summarize_censoring, summarize_strategy_replays, summarize_swing_holds
+from scanner.core.reporting import max_drawdown, profit_factor, summarize_censoring, summarize_strategy_replays, summarize_swing_holds
 from scanner.core.features import prepare_intraday_bars
-from .config import DanConfig
+from .config import (
+    DanConfig,
+    IMPULSE_GRID,
+    PULLBACK_DEPTH_GRID,
+    RETAINED_GAIN_GRID,
+    TURNOVER_GRID,
+)
 from .intraday import generate_dan_intraday_signals
 from .rules import default_dan_swing_rules
 from .swing import generate_dan_swing_signals
@@ -169,6 +175,108 @@ def replay_dan_swing_signals(
         pd.DataFrame(skips),
     )
 
+
+def persist_dan_rule_identity(replays: pd.DataFrame) -> pd.DataFrame:
+    """Persist setup + exit-rule identity so exported rows cannot be pooled accidentally."""
+    if replays.empty:
+        return replays.copy()
+    x = replays.copy()
+    if "setup_id" not in x.columns or "rule_id" not in x.columns:
+        return x
+    if "exit_rule_id" not in x.columns:
+        x["exit_rule_id"] = x["rule_id"].astype(str)
+    else:
+        missing = x["exit_rule_id"].isna()
+        x.loc[missing, "exit_rule_id"] = x.loc[missing, "rule_id"].astype(str)
+    setup = x["setup_id"].astype(str)
+    exit_rule = x["exit_rule_id"].astype(str)
+    x["rule_id"] = setup + "__" + exit_rule
+    return x
+
+
+def summarize_dan_threshold_grid(replays: pd.DataFrame) -> pd.DataFrame:
+    """Evaluate approved continuous Dan cuts for non-empty, complete replay groups.
+
+    The output is intentionally sparse: threshold combinations with zero qualifying
+    trades are omitted. This preserves full auditability without materialising
+    millions of empty rows.
+    """
+    if replays.empty:
+        return pd.DataFrame()
+    x = persist_dan_rule_identity(replays)
+    if "selection_eligible_replay" in x.columns:
+        x = x.loc[x["selection_eligible_replay"].fillna(True).astype(bool)].copy()
+    if x.empty:
+        return pd.DataFrame()
+
+    required = {
+        "strategy_id", "variant_id", "setup_id", "rule_id", "split",
+        "slippage_bps", "impulse_pct", "pm_dollar_turnover", "return_pct",
+    }
+    if not required.issubset(x.columns):
+        return pd.DataFrame()
+
+    x["_retained"] = pd.to_numeric(
+        x["retained_gain_ratio"] if "retained_gain_ratio" in x.columns else pd.Series(np.nan, index=x.index),
+        errors="coerce",
+    )
+    if "day0_retained_gain" in x.columns:
+        swing_retained = pd.to_numeric(x["day0_retained_gain"], errors="coerce")
+        x["_retained"] = x["_retained"].where(x["_retained"].notna(), swing_retained)
+    x["_pullback"] = pd.to_numeric(
+        x["pullback_depth"] if "pullback_depth" in x.columns else pd.Series(np.nan, index=x.index),
+        errors="coerce",
+    )
+    x["_impulse"] = pd.to_numeric(x["impulse_pct"], errors="coerce")
+    x["_turnover"] = pd.to_numeric(x["pm_dollar_turnover"], errors="coerce")
+    x["_return"] = pd.to_numeric(x["return_pct"], errors="coerce")
+    x["_r"] = pd.to_numeric(
+        x["r_multiple"] if "r_multiple" in x.columns else pd.Series(np.nan, index=x.index),
+        errors="coerce",
+    )
+    x = x.dropna(subset=["_impulse", "_turnover", "_retained", "_pullback", "_return"])
+    if x.empty:
+        return pd.DataFrame()
+
+    dims = ["strategy_id", "variant_id", "setup_id", "rule_id", "split", "slippage_bps"]
+    rows: list[dict] = []
+    for keys, group in x.groupby(dims, dropna=False, sort=False):
+        keys = keys if isinstance(keys, tuple) else (keys,)
+        identity = dict(zip(dims, keys))
+        for impulse_cut in IMPULSE_GRID:
+            impulse = group[group["_impulse"] >= float(impulse_cut)]
+            if impulse.empty:
+                continue
+            for turnover_cut in TURNOVER_GRID:
+                turnover = impulse[impulse["_turnover"] >= float(turnover_cut)]
+                if turnover.empty:
+                    continue
+                for retained_cut in RETAINED_GAIN_GRID:
+                    retained = turnover[turnover["_retained"] >= float(retained_cut)]
+                    if retained.empty:
+                        continue
+                    for pullback_cut in PULLBACK_DEPTH_GRID:
+                        selected = retained[retained["_pullback"] <= float(pullback_cut)]
+                        if selected.empty:
+                            continue
+                        returns = selected["_return"].dropna()
+                        if returns.empty:
+                            continue
+                        r_values = selected["_r"].dropna()
+                        rows.append({
+                            **identity,
+                            "min_impulse_pct": float(impulse_cut),
+                            "min_dollar_turnover": float(turnover_cut),
+                            "min_retained_gain": float(retained_cut),
+                            "max_pullback_depth": float(pullback_cut),
+                            "n": int(len(returns)),
+                            "win_rate": float((returns > 0).mean()),
+                            "expectancy": float(returns.mean()),
+                            "profit_factor": profit_factor(returns),
+                            "mean_r": float( r/values.mean() ) if not r_values.empty else np.nan,
+                            "max_drawdown": max_drawdown(returns),
+                        })
+    return pd.DataFrame(rows)
 
 def retained_gain_bucket(value) -> str:
     try:

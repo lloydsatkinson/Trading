@@ -160,3 +160,26 @@ def test_swing_grid_prepares_shared_bars_once(monkeypatch):
     )
     assert len(out) == 3
     assert calls == 1
+
+
+def test_time_exit_computes_excursions_only_once(monkeypatch):
+    calls = 0
+    original = multisession_replay._excursions_and_peak
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(multisession_replay, "_excursions_and_peak", counted)
+    result = simulate_multisession_trade(
+        multi_day_bars(),
+        entry_price=10.0,
+        entry_timestamp="2026-08-28 15:59-04:00",
+        direction="LONG",
+        rule=SwingReplayRule(stop_pct=.50, target_pct=5.0, max_hold_sessions=3),
+        split_end_date="2026-09-03",
+        available_end_date="2026-09-03",
+    )
+    assert result.exit_reason == "TIME"
+    assert calls == 1

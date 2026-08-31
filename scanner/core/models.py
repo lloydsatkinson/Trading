@@ -31,6 +31,27 @@ def market_cap_bucket(value: Any) -> str:
     return "LARGER"
 
 
+def price_bucket(value: Any) -> str:
+    price = _finite_number(value)
+    if price is None or price <= 0:
+        return "UNKNOWN"
+    if price < 1:
+        return "LT_1"
+    if price < 2:
+        return "1_2"
+    if price < 5:
+        return "2_5"
+    if price < 10:
+        return "5_10"
+    if price < 20:
+        return "10_20"
+    if price < 50:
+        return "20_50"
+    if price < 100:
+        return "50_100"
+    return "GE_100"
+
+
 @dataclass(frozen=True)
 class SignalRecord:
     strategy_id: str

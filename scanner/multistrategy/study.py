@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -12,8 +13,9 @@ import numpy as np
 import pandas as pd
 
 from scanner.core.features import opening_range, prepare_intraday_bars
-from scanner.core.models import market_cap_bucket
+from scanner.core.models import market_cap_bucket, price_bucket
 from scanner.core.validation import chronological_split
+from scanner.strategies.dan_irish.config import DanConfig
 from .config import MultiStrategyConfig
 
 ET = ZoneInfo("America/New_York")
@@ -112,6 +114,44 @@ def broad_candidate_context(
         "float_shares": optional.get("float_shares"),
         "catalyst_class": optional.get("catalyst_class", "UNKNOWN") or "UNKNOWN",
     }
+
+
+def dan_candidate_context(
+    early: pd.DataFrame,
+    prior_close: float,
+    cfg: DanConfig | None = None,
+    optional: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = cfg or DanConfig()
+    optional = optional or {}
+    if early.empty or not np.isfinite(prior_close) or prior_close <= 0:
+        return {
+            "dan_candidate": False,
+            "price_bucket": price_bucket(prior_close),
+            "float_shares": optional.get("float_shares"),
+            "catalyst_class": optional.get("catalyst_class", "UNKNOWN") or "UNKNOWN",
+        }
+    relaxed = MultiStrategyConfig(
+        min_gap_pct=0.0,
+        min_activity_dollar_turnover=0.0,
+        min_price=0.01,
+        max_price=1_000_000.0,
+    )
+    base = broad_candidate_context(early, prior_close, relaxed, optional)
+    pm_high = base.get("pm_high", np.nan)
+    hod10 = base.get("hod_1000", np.nan)
+    extension = np.nanmax([
+        float(pm_high) / prior_close if np.isfinite(pm_high) else np.nan,
+        float(hod10) / prior_close if np.isfinite(hod10) else np.nan,
+    ])
+    activity = max(float(base.get("pm_dollar_turnover") or 0.0), float(base.get("open30_dollar_turnover") or 0.0))
+    base["dan_candidate"] = bool(
+        np.isfinite(extension)
+        and extension >= 1.0 + cfg.min_reference_extension_pct
+        and activity >= cfg.min_activity_dollar_turnover
+    )
+    base["price_bucket"] = price_bucket(prior_close)
+    return base
 
 
 def opening_baseline_for_day(
@@ -243,20 +283,45 @@ class MultiStrategyStudy:
         out.to_csv(cache, index=False, compression="gzip")
         return out
 
-    def _fetch_minute_day(self, symbols: list[str], day: date) -> pd.DataFrame:
+    def ensure_minute_day(self, symbols: list[str], day: date) -> pd.DataFrame:
+        requested = sorted({str(symbol) for symbol in symbols if symbol})
         cache = self.paths.cache / "minute" / f"{day}_{self.feed}.csv.gz"
+        manifest = self.paths.cache / "minute" / f"{day}_{self.feed}.symbols.json"
         cache.parent.mkdir(parents=True, exist_ok=True)
+
+        existing = pd.DataFrame()
         if cache.exists():
-            out = pd.read_csv(cache)
+            existing = pd.read_csv(cache)
+            if not existing.empty:
+                existing["timestamp"] = pd.to_datetime(existing["timestamp"], utc=True)
+
+        manifested: set[str] = set()
+        if manifest.exists():
+            try:
+                manifested = {str(value) for value in json.loads(manifest.read_text(encoding="utf-8"))}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                manifested = set()
+        missing = sorted(set(requested) - manifested)
+        if missing:
+            start = datetime.combine(day, time(4), ET).astimezone(UTC)
+            end = datetime.combine(day, time(20), ET).astimezone(UTC)
+            parts = [
+                self.api.stock_bars(batch, self.cfg.minute_timeframe, start, end, feed=self.feed, limit=self.cfg.api_limit)
+                for batch in _chunks(missing, min(self.cfg.symbol_batch_size, 100))
+            ]
+            fresh = pd.concat([part for part in parts if not part.empty], ignore_index=True) if any(not part.empty for part in parts) else pd.DataFrame()
+            frames = [frame for frame in (existing, fresh) if not frame.empty]
+            out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             if not out.empty:
                 out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True)
+                out = out.drop_duplicates(["symbol", "timestamp"], keep="last").sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+            out.to_csv(cache, index=False, compression="gzip")
+            manifest.write_text(json.dumps(sorted(set(manifested) | set(requested))), encoding="utf-8")
             return out
-        start = datetime.combine(day, time(4), ET).astimezone(UTC)
-        end = datetime.combine(day, time(20), ET).astimezone(UTC)
-        parts = [self.api.stock_bars(batch, self.cfg.minute_timeframe, start, end, feed=self.feed, limit=self.cfg.api_limit) for batch in _chunks(symbols, min(self.cfg.symbol_batch_size, 100))]
-        out = pd.concat([p for p in parts if not p.empty], ignore_index=True) if any(not p.empty for p in parts) else pd.DataFrame()
-        out.to_csv(cache, index=False, compression="gzip")
-        return out
+        return existing
+
+    def _fetch_minute_day(self, symbols: list[str], day: date) -> pd.DataFrame:
+        return self.ensure_minute_day(symbols, day)
 
     def _fetch_opening_history(self, symbols: list[str], sessions: list[date], through_day: date) -> pd.DataFrame:
         if not symbols:

@@ -141,7 +141,7 @@ def generate_dan_intraday_signals(
         record.update({
             "split": str(context.get("split") or "forward"),
             "setup_id": setup_id,
-            "price_bucket": price_bucket(prior_close),
+            "price_bucket": price_bucket(raw_entry),
             "impulse_pct": impulse_pct,
             "impulse_high": impulse_high,
             "base_low": base_low,

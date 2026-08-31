@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -85,7 +86,7 @@ def _dan_contexts():
         "feed": "SIP",
         "prior_close": 4.00,
         "dan_candidate": True,
-        "price_bucket": "5_TO_10",
+        "price_bucket": "2_5",
         "pm_gap_pct": 0.20,
         "pm_dollar_turnover": 2_000_000.0,
         "opening_rvol": 6.0,
@@ -183,3 +184,6 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
         "censor_summary.csv",
     }
     assert expected.issubset({path.name for path in result.output_dir.iterdir()})
+
+    meta = json.loads((result.output_dir / "run_meta.json").read_text(encoding="utf-8"))
+    assert meta["market_data_adjustment"] == "raw"

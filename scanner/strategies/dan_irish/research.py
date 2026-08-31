@@ -217,8 +217,13 @@ def overnight_gap_risk_summary(swing_replays: pd.DataFrame, baseline_slippage_bp
     if swing_replays.empty:
         return pd.DataFrame()
     x = swing_replays.copy()
+    if "selection_eligible_replay" in x.columns:
+        eligible = x["selection_eligible_replay"].fillna(True).astype(bool)
+        x = x.loc[eligible].copy()
     if "slippage_bps" in x.columns:
         x = x[pd.to_numeric(x["slippage_bps"], errors="coerce").eq(float(baseline_slippage_bps))]
+    if x.empty:
+        return pd.DataFrame()
     dims = [c for c in ("strategy_id", "variant_id", "split", "price_bucket", "market_cap_bucket") if c in x.columns]
     rows = []
     for keys, group in x.groupby(dims, dropna=False, sort=False):

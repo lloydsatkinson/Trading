@@ -24,8 +24,10 @@ from scanner.strategies.dan_irish.research import (
     add_retained_gain_bucket,
     build_dan_summaries,
     generate_dan_signal_set,
+    persist_dan_rule_identity,
     replay_dan_swing_signals,
     run_study_with_optional_dan,
+    summarize_dan_threshold_grid,
 )
 from scanner.strategies.orb_stocks_in_play.strategy import generate_orb_signals
 from scanner.strategies.serclick_leo.strategy import adapt_serclick_ignitions
@@ -53,6 +55,7 @@ class ResearchResult:
     swing_hold_summary: pd.DataFrame
     overnight_gap_risk: pd.DataFrame
     censor_summary: pd.DataFrame
+    dan_threshold_summary: pd.DataFrame
 
 
 def read_csv(path: str | Path) -> pd.DataFrame:
@@ -446,6 +449,11 @@ def run_research(
 
     replays = pd.concat(replay_frames, ignore_index=True, sort=False) if replay_frames else pd.DataFrame()
     replays = add_retained_gain_bucket(replays)
+    if not replays.empty and "strategy_id" in replays.columns:
+        dan_mask = replays["strategy_id"].astype(str).eq("DAN_IRISH")
+        if dan_mask.any():
+            dan_identified = persist_dan_rule_identity(replays.loc[dan_mask].copy())
+            replays = pd.concat([replays.loc[~dan_mask].copy(), dan_identified], ignore_index=True, sort=False)
     skips = pd.concat(skip_frames, ignore_index=True, sort=False) if skip_frames else pd.DataFrame()
 
     summary = summarize_strategy_replays(replays)
@@ -464,6 +472,7 @@ def run_research(
     swing_hold_summary = dan_summaries["swing_hold_summary"]
     overnight_gap_risk = dan_summaries["overnight_gap_risk"]
     censor_summary = dan_summaries["censor_summary"]
+    dan_threshold_summary = summarize_dan_threshold_grid(dan_replays)
 
     ranking_source = summary.copy()
     if not ranking_source.empty and "variant_id" in ranking_source.columns:
@@ -504,6 +513,7 @@ def run_research(
     swing_hold_summary.to_csv(output_dir / "swing_hold_summary.csv", index=False)
     overnight_gap_risk.to_csv(output_dir / "overnight_gap_risk.csv", index=False)
     censor_summary.to_csv(output_dir / "censor_summary.csv", index=False)
+    dan_threshold_summary.to_csv(output_dir / "dan_threshold_summary.csv", index=False)
     skips.to_csv(output_dir / "skips.csv", index=False)
     (output_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
     news = render_news(meta, signals, leaderboard, peak_timing)
@@ -520,6 +530,7 @@ def run_research(
     swing_hold_summary.to_csv(latest / "dan_swing_hold_summary.csv", index=False)
     overnight_gap_risk.to_csv(latest / "dan_overnight_gap_risk.csv", index=False)
     censor_summary.to_csv(latest / "dan_censor_summary.csv", index=False)
+    dan_threshold_summary.to_csv(latest / "dan_threshold_summary.csv", index=False)
     (latest / "multistrategy_news.md").write_text(news, encoding="utf-8")
     (latest / "multistrategy_run_meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
 
@@ -539,6 +550,7 @@ def run_research(
         swing_hold_summary=swing_hold_summary,
         overnight_gap_risk=overnight_gap_risk,
         censor_summary=censor_summary,
+        dan_threshold_summary=dan_threshold_summary,
     )
 
 

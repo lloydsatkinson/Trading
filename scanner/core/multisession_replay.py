@@ -153,8 +153,8 @@ def _censored(reason: str, *, boundary: bool = False, right: bool = False) -> Sw
     )
 
 
-def simulate_multisession_trade(
-    bars: pd.DataFrame,
+def _simulate_prepared_multisession_trade(
+    x: pd.DataFrame,
     entry_price: float,
     entry_timestamp: Any,
     direction: str,
@@ -162,14 +162,14 @@ def simulate_multisession_trade(
     split_end_date: Any,
     available_end_date: Any,
 ) -> SwingReplayResult:
+    """Replay one swing rule over bars that have already been normalized once."""
     direction = _direction(direction)
     entry = float(entry_price)
-    if bars.empty or not np.isfinite(entry) or entry <= 0:
+    if x.empty or not np.isfinite(entry) or entry <= 0:
         return SwingReplayResult("NO_DATA", None, np.nan, np.nan, 0, selection_eligible_replay=False)
     if int(rule.max_hold_sessions) <= 0:
         raise ValueError("max_hold_sessions must be positive")
 
-    x = _prepare_bars(bars)
     entry_ts = _et_timestamp(entry_timestamp)
     entry_date = entry_ts.date()
     split_end = _as_date(split_end_date)
@@ -234,14 +234,16 @@ def simulate_multisession_trade(
             stop_hit = stop is not None and high >= stop
             target_hit = target is not None and low <= target
 
-        window = path.iloc[:seen_count]
-        mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
         if stop_hit:
+            window = path.iloc[:seen_count]
+            mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
             reason = "STOP_SAME_BAR" if target_hit else "STOP"
             ret = raw_return_pct(entry, stop, direction)
             r_mult = ret / risk_pct if risk_pct else np.nan
             return SwingReplayResult(reason, ts, float(stop), ret, seen_count, mfe, mae, r_mult, trading_peak, calendar_peak)
         if target_hit:
+            window = path.iloc[:seen_count]
+            mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
             ret = raw_return_pct(entry, target, direction)
             r_mult = ret / risk_pct if risk_pct else np.nan
             return SwingReplayResult("TARGET", ts, float(target), ret, seen_count, mfe, mae, r_mult, trading_peak, calendar_peak)
@@ -258,6 +260,26 @@ def simulate_multisession_trade(
     )
 
 
+def simulate_multisession_trade(
+    bars: pd.DataFrame,
+    entry_price: float,
+    entry_timestamp: Any,
+    direction: str,
+    rule: SwingReplayRule,
+    split_end_date: Any,
+    available_end_date: Any,
+) -> SwingReplayResult:
+    return _simulate_prepared_multisession_trade(
+        _prepare_bars(bars),
+        entry_price,
+        entry_timestamp,
+        direction,
+        rule,
+        split_end_date,
+        available_end_date,
+    )
+
+
 def replay_swing_signal_grid(
     bars: pd.DataFrame,
     signal: dict | pd.Series,
@@ -266,10 +288,11 @@ def replay_swing_signal_grid(
     available_end_date: Any,
 ) -> pd.DataFrame:
     signal_dict = signal.to_dict() if isinstance(signal, pd.Series) else dict(signal)
+    prepared = _prepare_bars(bars)
     rows: list[dict[str, Any]] = []
     for rule in rules:
-        result = simulate_multisession_trade(
-            bars=bars,
+        result = _simulate_prepared_multisession_trade(
+            prepared,
             entry_price=float(signal_dict["entry_price_slipped"]),
             entry_timestamp=signal_dict["entry_timestamp"],
             direction=str(signal_dict.get("direction", "LONG")),

@@ -88,6 +88,21 @@ def _next_bar_breakout(
     return None
 
 
+def _split_for_signal(
+    context: dict[str, Any],
+    signal_row: pd.Series,
+    session_splits: dict[str, str] | None,
+) -> str:
+    fallback = str(context.get("split") or "forward")
+    if not session_splits:
+        return fallback
+    signal_day = signal_row.get("session_date")
+    if signal_day is None or pd.isna(signal_day):
+        signal_day = pd.Timestamp(signal_row["timestamp_et"]).date()
+    key = str(pd.Timestamp(signal_day).date())
+    return str(session_splits.get(key, fallback))
+
+
 def _emit(
     context: dict[str, Any],
     variant_id: str,
@@ -102,10 +117,10 @@ def _emit(
     base_high: float,
     base_length_sessions: int | None,
     cfg: DanConfig,
+    session_splits: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     cap = _number(context.get("market_cap"))
     float_shares = _number(context.get("float_shares"))
-    prior_close = _number(context.get("prior_close"))
     raw_entry = float(entry_row["open"])
     record = SignalRecord(
         strategy_id="DAN_IRISH",
@@ -138,9 +153,9 @@ def _emit(
         },
     ).to_dict()
     record.update({
-        "split": str(context.get("split") or "forward"),
+        "split": _split_for_signal(context, signal_row, session_splits),
         "setup_id": setup_id,
-        "price_bucket": price_bucket(prior_close),
+        "price_bucket": price_bucket(raw_entry),
         "day0_hod": day0_hod,
         "day0_retained_gain": day0_retained_gain,
         "entry_family": entry_family,
@@ -161,6 +176,7 @@ def generate_dan_swing_signals(
     daily_bars: pd.DataFrame,
     minute_loader: MinuteLoader,
     cfg: DanConfig | None = None,
+    session_splits: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     cfg = cfg or DanConfig()
     symbol = str(day0_context.get("symbol") or "")
@@ -213,6 +229,7 @@ def generate_dan_swing_signals(
                         day0_context, "DAN_OVERNIGHT_CLOSE_ENTRY", setup,
                         signal, entry, day0_low, day0_hod, day0_retained,
                         "OVERNIGHT_CLOSE", day0_low, day0_hod, None, cfg,
+                        session_splits=session_splits,
                     ))
                     break
 
@@ -227,6 +244,7 @@ def generate_dan_swing_signals(
                 day0_context, "DAN_OVERNIGHT_AH_ENTRY", setup,
                 signal, entry, day0_low, day0_hod, day0_retained,
                 "OVERNIGHT_AH", day0_low, day0_hod, None, cfg,
+                session_splits=session_splits,
             ))
 
     followup = daily.iloc[day0_idx + 1:].reset_index(drop=True)
@@ -243,6 +261,7 @@ def generate_dan_swing_signals(
             day0_context, "DAN_OVERNIGHT_NEXT_OPEN", setup,
             day0, entry, day0_low, day0_hod, day0_retained,
             "OVERNIGHT_NEXT_OPEN", day0_low, day0_hod, None, cfg,
+            session_splits=session_splits,
         ))
 
         # Day-2 continuation base is frozen after the configured number of opening bars.
@@ -259,6 +278,7 @@ def generate_dan_swing_signals(
                     day0_context, "DAN_DAY2_CONTINUATION", setup,
                     signal, entry, base_low, day0_hod, day0_retained,
                     "DAY2", base_low, base_high, 1, cfg,
+                    session_splits=session_splits,
                 ))
 
     # Multi-day compression bases contain completed daily sessions only. The breakout session is never in its own base.
@@ -280,6 +300,7 @@ def generate_dan_swing_signals(
             day0_context, "DAN_MULTIDAY_COMPRESSION", setup,
             signal, entry, base_low, day0_hod, day0_retained,
             "MULTIDAY", base_low, base_high, base_length, cfg,
+            session_splits=session_splits,
         ))
 
     return pd.DataFrame(rows)

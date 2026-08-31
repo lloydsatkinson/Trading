@@ -44,17 +44,15 @@ def ensure_dan_followup_caches(study, contexts: pd.DataFrame, daily_bars: pd.Dat
     cfg = cfg or DanConfig()
     if contexts.empty or daily_bars.empty:
         return
-    ensured: set[tuple[str, date]] = set()
+    symbols_by_day: dict[date, set[str]] = {}
     for context in contexts.to_dict("records"):
         symbol = str(context["symbol"])
         day0 = pd.Timestamp(context["date"]).date()
         later = [day for day in _daily_dates_for_symbol(daily_bars, symbol) if day > day0][: int(cfg.followup_sessions)]
         for day in later:
-            key = (symbol, day)
-            if key in ensured:
-                continue
-            study.ensure_minute_day([symbol], day)
-            ensured.add(key)
+            symbols_by_day.setdefault(day, set()).add(symbol)
+    for day in sorted(symbols_by_day):
+        study.ensure_minute_day(sorted(symbols_by_day[day]), day)
 
 
 def generate_dan_signal_set(

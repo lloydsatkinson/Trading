@@ -73,7 +73,7 @@ def rank_strategies(
     summary: pd.DataFrame,
     min_n: int = 20,
     baseline_slippage_bps: float = 25.0,
-    production_min_expectancy: float = 0.10,
+    production_min_expectancy: float = 0.05,
 ) -> pd.DataFrame:
     """Rank fixed strategy/rule identities using validation data only.
 

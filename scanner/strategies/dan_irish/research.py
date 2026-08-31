@@ -63,6 +63,7 @@ def generate_dan_signal_set(
     root = Path(root)
     contexts = meta.get("dan_candidate_contexts", pd.DataFrame())
     daily_bars = meta.get("daily_bars", pd.DataFrame())
+    session_splits = meta.get("session_splits", {})
     if contexts is None or contexts.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -88,7 +89,13 @@ def generate_dan_signal_set(
             intraday["_cache_namespace"] = "multistrategy_alpaca"
             frames.append(intraday)
 
-        swing = generate_dan_swing_signals(context, daily_bars, load_symbol_minutes, cfg)
+        swing = generate_dan_swing_signals(
+            context,
+            daily_bars,
+            load_symbol_minutes,
+            cfg,
+            session_splits=session_splits,
+        )
         if not swing.empty:
             swing = swing.copy()
             swing["_cache_namespace"] = "multistrategy_alpaca"
@@ -203,7 +210,16 @@ def overnight_gap_risk_summary(swing_replays: pd.DataFrame, baseline_slippage_bp
         x = x[pd.to_numeric(x["slippage_bps"], errors="coerce").eq(float(baseline_slippage_bps))]
     if x.empty:
         return pd.DataFrame()
-    dims = [c for c in ("strategy_id", "variant_id", "split", "price_bucket", "market_cap_bucket") if c in x.columns]
+    dims = [c for c in (
+        "strategy_id",
+        "variant_id",
+        "setup_id",
+        "rule_id",
+        "max_hold_sessions",
+        "split",
+        "price_bucket",
+        "market_cap_bucket",
+    ) if c in x.columns]
     rows = []
     for keys, group in x.groupby(dims, dropna=False, sort=False):
         keys = keys if isinstance(keys, tuple) else (keys,)

@@ -175,6 +175,11 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
     assert not result.price_bucket_summary.empty
     assert not result.swing_hold_summary.empty
     assert not result.censor_summary.empty
+    assert not result.dan_threshold_summary.empty
+
+    dan_replays = result.replays[result.replays["strategy_id"].eq("DAN_IRISH")]
+    assert "exit_rule_id" in dan_replays.columns
+    assert dan_replays["rule_id"].astype(str).str.contains("__", regex=False).all()
 
     expected = {
         "price_bucket_summary.csv",
@@ -182,8 +187,10 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
         "swing_hold_summary.csv",
         "overnight_gap_risk.csv",
         "censor_summary.csv",
+        "dan_threshold_summary.csv",
     }
     assert expected.issubset({path.name for path in result.output_dir.iterdir()})
+    assert (tmp_path / "data" / "latest" / "dan_threshold_summary.csv").exists()
 
     meta = json.loads((result.output_dir / "run_meta.json").read_text(encoding="utf-8"))
     assert meta["market_data_adjustment"] == "raw"

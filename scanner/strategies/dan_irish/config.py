@@ -11,6 +11,8 @@ PULLBACK_DEPTH_GRID = (0.10, 0.20, 0.30, 0.40, 0.50)
 BREAKOUT_VOLUME_RATIO_GRID = (1.0, 1.5, 2.0)
 SWING_HOLD_SESSIONS = (1, 2, 3, 4, 5, 7, 10)
 SWING_STOP_PCTS = (0.05, 0.08, 0.10, 0.15, 0.20)
+MAX_COMPRESSION_BASE_SESSIONS = 5
+MIN_REQUIRED_FOLLOWUP_SESSIONS = MAX_COMPRESSION_BASE_SESSIONS + 1 + max(SWING_HOLD_SESSIONS)
 
 
 @dataclass(frozen=True)
@@ -23,4 +25,4 @@ class DanConfig:
     min_breakout_volume_ratio: float = 1.0
     volume_lookback_bars: int = 5
     slippage_bps: float = 25.0
-    followup_sessions: int = 10
+    followup_sessions: int = MIN_REQUIRED_FOLLOWUP_SESSIONS

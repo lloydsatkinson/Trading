@@ -6,6 +6,7 @@ from scanner.core.reporting import (
     summarize_strategy_replays,
     summarize_swing_holds,
 )
+from scanner.strategies.dan_irish.research import overnight_gap_risk_summary
 from scanner.strategies.dan_irish.rules import default_dan_swing_rules
 
 
@@ -79,3 +80,24 @@ def test_swing_hold_summary_keeps_horizon_and_peak_timing():
     assert row["max_hold_sessions"] == 2
     assert row["n"] == 2
     assert np.isclose(row["mean_trading_days_to_peak"], 0.5)
+
+
+def test_overnight_gap_risk_excludes_censored_replays_from_denominator():
+    base = {
+        "strategy_id": "DAN_IRISH",
+        "variant_id": "DAN_OVERNIGHT_NEXT_OPEN",
+        "split": "validation",
+        "price_bucket": "2_5",
+        "market_cap_bucket": "MICROCAP",
+        "slippage_bps": 25.0,
+    }
+    x = pd.DataFrame([
+        {**base, "exit_reason": "GAP_STOP", "return_pct": -0.25, "selection_eligible_replay": True},
+        {**base, "exit_reason": "TARGET", "return_pct": 0.20, "selection_eligible_replay": True},
+        {**base, "exit_reason": "RIGHT_CENSORED", "return_pct": np.nan, "selection_eligible_replay": False},
+    ])
+    out = overnight_gap_risk_summary(x)
+    row = out.iloc[0]
+    assert row["replays_n"] == 2
+    assert row["gap_stop_n"] == 1
+    assert np.isclose(row["gap_stop_rate"], 0.5)

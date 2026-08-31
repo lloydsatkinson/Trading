@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 import scripts.run_strategy_research as runner
+from scanner.core.multisession_replay import SwingReplayRule
 
 
 def _bars(day, rows):
@@ -127,6 +128,16 @@ def _blocked_http(*args, **kwargs):
     raise AssertionError("API-free Dan smoke test attempted an HTTP request")
 
 
+def _integration_rules(signal):
+    # The complete 455-rule Dan grid is asserted independently in
+    # test_dan_reporting.py. The integration smoke only needs representative
+    # 1- and 2-session rules to prove the runner uses real swing replay/censoring.
+    return [
+        SwingReplayRule(stop_pct=0.08, target_r_multiple=2.0, max_hold_sessions=1),
+        SwingReplayRule(stop_pct=0.08, target_r_multiple=2.0, max_hold_sessions=2),
+    ]
+
+
 def test_parse_strategies_supports_dan_and_all():
     assert runner._parse_strategies("dan") == ("dan",)
     assert "dan" in runner._parse_strategies("all")
@@ -144,6 +155,7 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
         frame.to_csv(cache / f"{day}_sip.csv.gz", index=False, compression="gzip")
 
     monkeypatch.setattr(runner, "MultiStrategyStudy", _FakeDanStudy)
+    monkeypatch.setattr("scanner.strategies.dan_irish.research.default_dan_swing_rules", _integration_rules)
     monkeypatch.setattr("requests.sessions.Session.request", _blocked_http)
 
     result = runner.run_research(

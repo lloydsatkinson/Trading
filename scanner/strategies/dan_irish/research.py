@@ -273,7 +273,7 @@ def summarize_dan_threshold_grid(replays: pd.DataFrame) -> pd.DataFrame:
                             "win_rate": float((returns > 0).mean()),
                             "expectancy": float(returns.mean()),
                             "profit_factor": profit_factor(returns),
-                            "mean_r": float( r/values.mean() ) if not r_values.empty else np.nan,
+                            "mean_r": float(r_values.mean()) if not r_values.empty else np.nan,
                             "max_drawdown": max_drawdown(returns),
                         })
     return pd.DataFrame(rows)

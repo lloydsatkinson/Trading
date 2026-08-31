@@ -19,132 +19,29 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
+          import base64
           from pathlib import Path
 
-          path = Path('scanner/strategies/dan_irish/research.py')
-          text = path.read_text(encoding='utf-8')
-
-          old_import = 'from scanner.core.reporting import summarize_censoring, summarize_strategy_replays, summarize_swing_holds\n'
-          new_import = 'from scanner.core.reporting import max_drawdown, profit_factor, summarize_censoring, summarize_strategy_replays, summarize_swing_holds\n'
+          path = Path("scanner/strategies/dan_irish/research.py")
+          text = path.read_text(encoding="utf-8")
+          old_import = "from scanner.core.reporting import summarize_censoring, summarize_strategy_replays, summarize_swing_holds\n"
+          new_import = "from scanner.core.reporting import max_drawdown, profit_factor, summarize_censoring, summarize_strategy_replays, summarize_swing_holds\n"
           if old_import in text:
               text = text.replace(old_import, new_import, 1)
 
-          old_config = 'from .config import DanConfig\n'
-          new_config = '''from .config import (\n    DanConfig,\n    IMPULSE_GRID,\n    PULLBACK_DEPTH_GRID,\n    RETAINED_GAIN_GRID,\n    TURNOVER_GRID,\n)\n'''
+          old_config = "from .config import DanConfig\n"
+          new_config = "from .config import (\n    DanConfig,\n    IMPULSE_GRID,\n    PULLBACK_DEPTH_GRID,\n    RETAINED_GAIN_GRID,\n    TURNOVER_GRID,\n)\n"
           if old_config in text:
               text = text.replace(old_config, new_config, 1)
 
-          marker = '\ndef retained_gain_bucket(value) -> str:\n'
-          addition = r'''
-
-def persist_dan_rule_identity(replays: pd.DataFrame) -> pd.DataFrame:
-    """Persist setup + exit-rule identity so exported rows cannot be pooled accidentally."""
-    if replays.empty:
-        return replays.copy()
-    x = replays.copy()
-    if "setup_id" not in x.columns or "rule_id" not in x.columns:
-        return x
-    if "exit_rule_id" not in x.columns:
-        x["exit_rule_id"] = x["rule_id"].astype(str)
-    else:
-        missing = x["exit_rule_id"].isna()
-        x.loc[missing, "exit_rule_id"] = x.loc[missing, "rule_id"].astype(str)
-    setup = x["setup_id"].astype(str)
-    exit_rule = x["exit_rule_id"].astype(str)
-    x["rule_id"] = setup + "__" + exit_rule
-    return x
-
-
-def summarize_dan_threshold_grid(replays: pd.DataFrame) -> pd.DataFrame:
-    """Evaluate approved continuous Dan cuts for non-empty, complete replay groups.
-
-    The output is intentionally sparse: threshold combinations with zero qualifying
-    trades are omitted. This preserves full auditability without materialising
-    millions of empty rows.
-    """
-    if replays.empty:
-        return pd.DataFrame()
-    x = persist_dan_rule_identity(replays)
-    if "selection_eligible_replay" in x.columns:
-        x = x.loc[x["selection_eligible_replay"].fillna(True).astype(bool)].copy()
-    if x.empty:
-        return pd.DataFrame()
-
-    required = {
-        "strategy_id", "variant_id", "setup_id", "rule_id", "split",
-        "slippage_bps", "impulse_pct", "pm_dollar_turnover", "return_pct",
-    }
-    if not required.issubset(x.columns):
-        return pd.DataFrame()
-
-    x["_retained"] = pd.to_numeric(
-        x["retained_gain_ratio"] if "retained_gain_ratio" in x.columns else pd.Series(np.nan, index=x.index),
-        errors="coerce",
-    )
-    if "day0_retained_gain" in x.columns:
-        swing_retained = pd.to_numeric(x["day0_retained_gain"], errors="coerce")
-        x["_retained"] = x["_retained"].where(x["_retained"].notna(), swing_retained)
-    x["_pullback"] = pd.to_numeric(
-        x["pullback_depth"] if "pullback_depth" in x.columns else pd.Series(np.nan, index=x.index),
-        errors="coerce",
-    )
-    x["_impulse"] = pd.to_numeric(x["impulse_pct"], errors="coerce")
-    x["_turnover"] = pd.to_numeric(x["pm_dollar_turnover"], errors="coerce")
-    x["_return"] = pd.to_numeric(x["return_pct"], errors="coerce")
-    x["_r"] = pd.to_numeric(
-        x["r_multiple"] if "r_multiple" in x.columns else pd.Series(np.nan, index=x.index),
-        errors="coerce",
-    )
-    x = x.dropna(subset=["_impulse", "_turnover", "_retained", "_pullback", "_return"])
-    if x.empty:
-        return pd.DataFrame()
-
-    dims = ["strategy_id", "variant_id", "setup_id", "rule_id", "split", "slippage_bps"]
-    rows: list[dict] = []
-    for keys, group in x.groupby(dims, dropna=False, sort=False):
-        keys = keys if isinstance(keys, tuple) else (keys,)
-        identity = dict(zip(dims, keys))
-        for impulse_cut in IMPULSE_GRID:
-            impulse = group[group["_impulse"] >= float(impulse_cut)]
-            if impulse.empty:
-                continue
-            for turnover_cut in TURNOVER_GRID:
-                turnover = impulse[impulse["_turnover"] >= float(turnover_cut)]
-                if turnover.empty:
-                    continue
-                for retained_cut in RETAINED_GAIN_GRID:
-                    retained = turnover[turnover["_retained"] >= float(retained_cut)]
-                    if retained.empty:
-                        continue
-                    for pullback_cut in PULLBACK_DEPTH_GRID:
-                        selected = retained[retained["_pullback"] <= float(pullback_cut)]
-                        if selected.empty:
-                            continue
-                        returns = selected["_return"].dropna()
-                        if returns.empty:
-                            continue
-                        r_values = selected["_r"].dropna()
-                        rows.append({
-                            **identity,
-                            "min_impulse_pct": float(impulse_cut),
-                            "min_dollar_turnover": float(turnover_cut),
-                            "min_retained_gain": float(retained_cut),
-                            "max_pullback_depth": float(pullback_cut),
-                            "n": int(len(returns)),
-                            "win_rate": float((returns > 0).mean()),
-                            "expectancy": float(returns.mean()),
-                            "profit_factor": profit_factor(returns),
-                            "mean_r": float(r_values.mean()) if not r_values.empty else np.nan,
-                            "max_drawdown": max_drawdown(returns),
-                        })
-    return pd.DataFrame(rows)
-'''
-          if 'def persist_dan_rule_identity(' not in text:
+          addition = base64.b64decode("CmRlZiBwZXJzaXN0X2Rhbl9ydWxlX2lkZW50aXR5KHJlcGxheXM6IHBkLkRhdGFGcmFtZSkgLT4gcGQuRGF0YUZyYW1lOgogICAgIiIiUGVyc2lzdCBzZXR1cCArIGV4aXQtcnVsZSBpZGVudGl0eSBzbyBleHBvcnRlZCByb3dzIGNhbm5vdCBiZSBwb29sZWQgYWNjaWRlbnRhbGx5LiIiIgogICAgaWYgcmVwbGF5cy5lbXB0eToKICAgICAgICByZXR1cm4gcmVwbGF5cy5jb3B5KCkKICAgIHggPSByZXBsYXlzLmNvcHkoKQogICAgaWYgInNldHVwX2lkIiBub3QgaW4geC5jb2x1bW5zIG9yICJydWxlX2lkIiBub3QgaW4geC5jb2x1bW5zOgogICAgICAgIHJldHVybiB4CiAgICBpZiAiZXhpdF9ydWxlX2lkIiBub3QgaW4geC5jb2x1bW5zOgogICAgICAgIHhbImV4aXRfcnVsZV9pZCJdID0geFsicnVsZV9pZCJdLmFzdHlwZShzdHIpCiAgICBlbHNlOgogICAgICAgIG1pc3NpbmcgPSB4WyJleGl0X3J1bGVfaWQiXS5pc25hKCkKICAgICAgICB4LmxvY1ttaXNzaW5nLCAiZXhpdF9ydWxlX2lkIl0gPSB4LmxvY1ttaXNzaW5nLCAicnVsZV9pZCJdLmFzdHlwZShzdHIpCiAgICBzZXR1cCA9IHhbInNldHVwX2lkIl0uYXN0eXBlKHN0cikKICAgIGV4aXRfcnVsZSA9IHhbImV4aXRfcnVsZV9pZCJdLmFzdHlwZShzdHIpCiAgICB4WyJydWxlX2lkIl0gPSBzZXR1cCArICJfXyIgKyBleGl0X3J1bGUKICAgIHJldHVybiB4CgoKZGVmIHN1bW1hcml6ZV9kYW5fdGhyZXNob2xkX2dyaWQocmVwbGF5czogcGQuRGF0YUZyYW1lKSAtPiBwZC5EYXRhRnJhbWU6CiAgICAiIiJFdmFsdWF0ZSBhcHByb3ZlZCBjb250aW51b3VzIERhbiBjdXRzIGZvciBub24tZW1wdHksIGNvbXBsZXRlIHJlcGxheSBncm91cHMuCgogICAgVGhlIG91dHB1dCBpcyBpbnRlbnRpb25hbGx5IHNwYXJzZTogdGhyZXNob2xkIGNvbWJpbmF0aW9ucyB3aXRoIHplcm8gcXVhbGlmeWluZwogICAgdHJhZGVzIGFyZSBvbWl0dGVkLiBUaGlzIHByZXNlcnZlcyBmdWxsIGF1ZGl0YWJpbGl0eSB3aXRob3V0IG1hdGVyaWFsaXNpbmcKICAgIG1pbGxpb25zIG9mIGVtcHR5IHJvd3MuCiAgICAiIiIKICAgIGlmIHJlcGxheXMuZW1wdHk6CiAgICAgICAgcmV0dXJuIHBkLkRhdGFGcmFtZSgpCiAgICB4ID0gcGVyc2lzdF9kYW5fcnVsZV9pZGVudGl0eShyZXBsYXlzKQogICAgaWYgInNlbGVjdGlvbl9lbGlnaWJsZV9yZXBsYXkiIGluIHguY29sdW1uczoKICAgICAgICB4ID0geC5sb2NbeFsic2VsZWN0aW9uX2VsaWdpYmxlX3JlcGxheSJdLmZpbGxuYShUcnVlKS5hc3R5cGUoYm9vbCldLmNvcHkoKQogICAgaWYgeC5lbXB0eToKICAgICAgICByZXR1cm4gcGQuRGF0YUZyYW1lKCkKCiAgICByZXF1aXJlZCA9IHsKICAgICAgICAic3RyYXRlZ3lfaWQiLCAidmFyaWFudF9pZCIsICJzZXR1cF9pZCIsICJydWxlX2lkIiwgInNwbGl0IiwKICAgICAgICAic2xpcHBhZ2VfYnBzIiwgImltcHVsc2VfcGN0IiwgInBtX2RvbGxhcl90dXJub3ZlciIsICJyZXR1cm5fcGN0IiwKICAgIH0KICAgIGlmIG5vdCByZXF1aXJlZC5pc3N1YnNldCh4LmNvbHVtbnMpOgogICAgICAgIHJldHVybiBwZC5EYXRhRnJhbWUoKQoKICAgIHhbIl9yZXRhaW5lZCJdID0gcGQudG9fbnVtZXJpYygKICAgICAgICB4WyJyZXRhaW5lZF9nYWluX3JhdGlvIl0gaWYgInJldGFpbmVkX2dhaW5fcmF0aW8iIGluIHguY29sdW1ucyBlbHNlIHBkLlNlcmllcyhucC5uYW4sIGluZGV4PXguaW5kZXgpLAogICAgICAgIGVycm9ycz0iY29lcmNlIiwKICAgICkKICAgIGlmICJkYXkwX3JldGFpbmVkX2dhaW4iIGluIHguY29sdW1uczoKICAgICAgICBzd2luZ19yZXRhaW5lZCA9IHBkLnRvX251bWVyaWMoeFsiZGF5MF9yZXRhaW5lZF9nYWluIl0sIGVycm9ycz0iY29lcmNlIikKICAgICAgICB4WyJfcmV0YWluZWQiXSA9IHhbIl9yZXRhaW5lZCJdLndoZXJlKHhbIl9yZXRhaW5lZCJdLm5vdG5hKCksIHN3aW5nX3JldGFpbmVkKQogICAgeFsiX3B1bGxiYWNrIl0gPSBwZC50b19udW1lcmljKAogICAgICAgIHhbInB1bGxiYWNrX2RlcHRoIl0gaWYgInB1bGxiYWNrX2RlcHRoIiBpbiB4LmNvbHVtbnMgZWxzZSBwZC5TZXJpZXMobnAubmFuLCBpbmRleD14LmluZGV4KSwKICAgICAgICBlcnJvcnM9ImNvZXJjZSIsCiAgICApCiAgICB4WyJfaW1wdWxzZSJdID0gcGQudG9fbnVtZXJpYyh4WyJpbXB1bHNlX3BjdCJdLCBlcnJvcnM9ImNvZXJjZSIpCiAgICB4WyJfdHVybm92ZXIiXSA9IHBkLnRvX251bWVyaWMoeFsicG1fZG9sbGFyX3R1cm5vdmVyIl0sIGVycm9ycz0iY29lcmNlIikKICAgIHhbIl9yZXR1cm4iXSA9IHBkLnRvX251bWVyaWMoeFsicmV0dXJuX3BjdCJdLCBlcnJvcnM9ImNvZXJjZSIpCiAgICB4WyJfciJdID0gcGQudG9fbnVtZXJpYygKICAgICAgICB4WyJyX211bHRpcGxlIl0gaWYgInJfbXVsdGlwbGUiIGluIHguY29sdW1ucyBlbHNlIHBkLlNlcmllcyhucC5uYW4sIGluZGV4PXguaW5kZXgpLAogICAgICAgIGVycm9ycz0iY29lcmNlIiwKICAgICkKICAgIHggPSB4LmRyb3BuYShzdWJzZXQ9WyJfaW1wdWxzZSIsICJfdHVybm92ZXIiLCAiX3JldGFpbmVkIiwgIl9wdWxsYmFjayIsICJfcmV0dXJuIl0pCiAgICBpZiB4LmVtcHR5OgogICAgICAgIHJldHVybiBwZC5EYXRhRnJhbWUoKQoKICAgIGRpbXMgPSBbInN0cmF0ZWd5X2lkIiwgInZhcmlhbnRfaWQiLCAic2V0dXBfaWQiLCAicnVsZV9pZCIsICJzcGxpdCIsICJzbGlwcGFnZV9icHMiXQogICAgcm93czogbGlzdFtkaWN0XSA9IFtdCiAgICBmb3Iga2V5cywgZ3JvdXAgaW4geC5ncm91cGJ5KGRpbXMsIGRyb3BuYT1GYWxzZSwgc29ydD1GYWxzZSk6CiAgICAgICAga2V5cyA9IGtleXMgaWYgaXNpbnN0YW5jZShrZXlzLCB0dXBsZSkgZWxzZSAoa2V5cywpCiAgICAgICAgaWRlbnRpdHkgPSBkaWN0KHppcChkaW1zLCBrZXlzKSkKICAgICAgICBmb3IgaW1wdWxzZV9jdXQgaW4gSU1QVUxTRV9HUklEOgogICAgICAgICAgICBpbXB1bHNlID0gZ3JvdXBbZ3JvdXBbIl9pbXB1bHNlIl0gPj0gZmxvYXQoaW1wdWxzZV9jdXQpXQogICAgICAgICAgICBpZiBpbXB1bHNlLmVtcHR5OgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgZm9yIHR1cm5vdmVyX2N1dCBpbiBUVVJOT1ZFUl9HUklEOgogICAgICAgICAgICAgICAgdHVybm92ZXIgPSBpbXB1bHNlW2ltcHVsc2VbIl90dXJub3ZlciJdID49IGZsb2F0KHR1cm5vdmVyX2N1dCldCiAgICAgICAgICAgICAgICBpZiB0dXJub3Zlci5lbXB0eToKICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgZm9yIHJldGFpbmVkX2N1dCBpbiBSRVRBSU5FRF9HQUlOX0dSSUQ6CiAgICAgICAgICAgICAgICAgICAgcmV0YWluZWQgPSB0dXJub3Zlclt0dXJub3ZlclsiX3JldGFpbmVkIl0gPj0gZmxvYXQocmV0YWluZWRfY3V0KV0KICAgICAgICAgICAgICAgICAgICBpZiByZXRhaW5lZC5lbXB0eToKICAgICAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgICAgICBmb3IgcHVsbGJhY2tfY3V0IGluIFBVTExCQUNLX0RFUFRIX0dSSUQ6CiAgICAgICAgICAgICAgICAgICAgICAgIHNlbGVjdGVkID0gcmV0YWluZWRbcmV0YWluZWRbIl9wdWxsYmFjayJdIDw9IGZsb2F0KHB1bGxiYWNrX2N1dCldCiAgICAgICAgICAgICAgICAgICAgICAgIGlmIHNlbGVjdGVkLmVtcHR5OgogICAgICAgICAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgICAgICAgICAgcmV0dXJucyA9IHNlbGVjdGVkWyJfcmV0dXJuIl0uZHJvcG5hKCkKICAgICAgICAgICAgICAgICAgICAgICAgaWYgcmV0dXJucy5lbXB0eToKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAgICAgICAgICAgIHJfdmFsdWVzID0gc2VsZWN0ZWRbIl9yIl0uZHJvcG5hKCkKICAgICAgICAgICAgICAgICAgICAgICAgcm93cy5hcHBlbmQoewogICAgICAgICAgICAgICAgICAgICAgICAgICAgKippZGVudGl0eSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICJtaW5faW1wdWxzZV9wY3QiOiBmbG9hdChpbXB1bHNlX2N1dCksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAibWluX2RvbGxhcl90dXJub3ZlciI6IGZsb2F0KHR1cm5vdmVyX2N1dCksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAibWluX3JldGFpbmVkX2dhaW4iOiBmbG9hdChyZXRhaW5lZF9jdXQpLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgIm1heF9wdWxsYmFja19kZXB0aCI6IGZsb2F0KHB1bGxiYWNrX2N1dCksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAibiI6IGludChsZW4ocmV0dXJucykpLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgIndpbl9yYXRlIjogZmxvYXQoKHJldHVybnMgPiAwKS5tZWFuKCkpLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgImV4cGVjdGFuY3kiOiBmbG9hdChyZXR1cm5zLm1lYW4oKSksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAicHJvZml0X2ZhY3RvciI6IHByb2ZpdF9mYWN0b3IocmV0dXJucyksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAibWVhbl9yIjogZmxvYXQoIHIvdmFsdWVzLm1lYW4oKSApIGlmIG5vdCByX3ZhbHVlcy5lbXB0eSBlbHNlIG5wLm5hbiwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICJtYXhfZHJhd2Rvd24iOiBtYXhfZHJhd2Rvd24ocmV0dXJucyksCiAgICAgICAgICAgICAgICAgICAgICAgIH0pCiAgICByZXR1cm4gcGQuRGF0YUZyYW1lKHJvd3MpCg==").decode("utf-8")
+          marker = "\ndef retained_gain_bucket(value) -> str:\n"
+          if "def persist_dan_rule_identity(" not in text:
               if marker not in text:
-                  raise SystemExit('retained_gain_bucket marker not found')
+                  raise SystemExit("retained_gain_bucket marker not found")
               text = text.replace(marker, addition + marker, 1)
 
-          path.write_text(text, encoding='utf-8')
+          path.write_text(text, encoding="utf-8")
           PY
       - name: Commit patch if needed
         shell: bash

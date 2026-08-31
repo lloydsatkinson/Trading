@@ -14,37 +14,16 @@ from scanner.core.features import prepare_intraday_bars
 from .config import DanConfig
 from .intraday import generate_dan_intraday_signals
 from .rules import default_dan_swing_rules
-from .study_adapter import run_dan_candidate_study
 from .swing import generate_dan_swing_signals
 
 MinuteCacheLoader = Callable[[Path, str, str, str, str], pd.DataFrame]
 
 
 def run_study_with_optional_dan(study, *, needs_price_volume: bool, needs_dan: bool) -> dict:
-    if not needs_dan:
-        return study.run()
-
-    # Native shape first so tests/future MultiStrategyStudy versions can use the
-    # approved interface directly. Current production code falls back to the
-    # cache-reusing adapter without altering ORB/VWAP run semantics.
-    try:
-        native = study.run(include_dan_candidates=True)
-    except TypeError:
-        native = None
-    if isinstance(native, dict) and "dan_candidate_contexts" in native:
-        return native
-
-    dan_meta = run_dan_candidate_study(study)
-    if not needs_price_volume:
-        return dan_meta
-
-    base = study.run()
-    merged = dict(base)
-    merged["dan_candidate_contexts"] = dan_meta.get("dan_candidate_contexts", pd.DataFrame())
-    merged["daily_bars"] = dan_meta.get("daily_bars", pd.DataFrame())
-    merged["split_end_dates"] = dan_meta.get("split_end_dates", {})
-    merged["minute_files"] = sorted(set(base.get("minute_files", [])) | set(dan_meta.get("minute_files", [])))
-    return merged
+    # needs_price_volume remains part of the runner-facing contract, but native
+    # study discovery now handles the union of broad and Dan candidates in one pass.
+    _ = needs_price_volume
+    return study.run(include_dan_candidates=True) if needs_dan else study.run()
 
 
 def _daily_dates_for_symbol(daily_bars: pd.DataFrame, symbol: str) -> list[date]:

@@ -25,17 +25,19 @@ Do not build a separate research stack.
 
 Reuse the existing:
 
-- `scanner/multistrategy/study.py` candidate discovery and Alpaca cache namespaces;
+- `scanner/multistrategy/study.py` Alpaca data/cache infrastructure;
 - common signal schema used by ORB, VWAP and SerClick adapters;
 - next-executable-bar entry discipline;
 - adverse entry-slippage scenarios of 10, 25, 50, 75 and 100 bps;
 - stop-first treatment when stop and target are touched in the same one-minute bar;
-- chronological `development -> validation -> test -> forward` split discipline;
+- chronological `development -> validation -> test -> forward` discipline;
 - 25-bps validation-led strategy ranking;
 - production promotion expectancy hurdle already enforced by the portfolio ranking layer;
 - MFE/MAE and exact time-to-peak analysis where applicable;
 - market-cap enrichment rules that never backfill future market-cap snapshots onto historical observations;
 - API-free CI philosophy and synthetic integration testing.
+
+The current ORB/VWAP broad candidate defaults remain unchanged, including their existing $1-$30 discovery gate. Dan's broader price research is additive and must not silently widen the candidate population used by ORB or VWAP.
 
 The frozen SerClick historical baseline ending 2026-08-27 must remain unchanged.
 
@@ -59,6 +61,8 @@ Price is a research dimension, not a proxy for company size. Every Dan result mu
 Unknown market cap or float remains explicitly `UNKNOWN` rather than being silently imputed.
 
 Below-$1 names are included for research but never pooled with higher-priced names when evaluating execution quality because spreads, halts, dilution risk and microstructure may be materially different.
+
+Dan candidate discovery uses a separate Dan-specific candidate flag/config. It must not change `MultiStrategyConfig.min_price=1.0` or `MultiStrategyConfig.max_price=30.0` for the existing strategies.
 
 ## 4. Common Dan Candidate Features
 
@@ -100,9 +104,9 @@ For long candidates:
 
 when the denominator is positive.
 
-Examples:
+Example:
 
-- prior/impulse start $2;
+- impulse start $2;
 - impulse high $6;
 - reference price $5;
 - retained gain ratio = 3 / 4 = 0.75.
@@ -255,7 +259,7 @@ Breakout families include base-high break and Day-0-HOD break as separate rule i
 
 ## 9. Swing Risk, Exit and Hold Research
 
-Swing replay must be implemented separately from the existing same-session minute replay where necessary.
+Swing replay is separate from the existing same-session minute replay where necessary.
 
 Test maximum hold horizons:
 
@@ -283,6 +287,23 @@ Test exit families independently:
 For overnight and multi-day trades, stops may gap through. Fill at the first executable observed price after the stop becomes violated; do not assume a fill at the stop price.
 
 Record multi-day MFE, MAE, trading-days-to-peak and calendar-days-to-peak.
+
+### 9.1 Split-Boundary Safety for Swing Outcomes
+
+A swing outcome used to choose a rule may not consume price data from a later validation class.
+
+For each replay rule/horizon:
+
+- determine the last session that can be observed while remaining inside the signal's assigned split;
+- if the requested maximum hold extends beyond that boundary, mark that replay `boundary_censored=true` and exclude it from parameter-selection summaries for that horizon;
+- do not truncate the trade at the split boundary and pretend the truncated return is the requested hold rule;
+- test-period prices may never influence development/validation rule selection;
+- forward prices may never influence any historical selection;
+- reports include counts of boundary-censored signals by variant and hold horizon.
+
+Equivalent purge/embargo logic is acceptable if it produces the same no-leakage guarantee and is covered by tests.
+
+Signals near the final available data date that do not have their full requested future horizon are similarly `right_censored=true` and excluded from complete-horizon metrics.
 
 ## 10. Segmentation and Leaderboards
 
@@ -313,7 +334,8 @@ Core comparison metrics:
 - best hold horizon;
 - time to peak;
 - execution/slippage resilience;
-- overnight gap loss distribution for swing variants.
+- overnight gap loss distribution for swing variants;
+- boundary/right-censor counts.
 
 The Dan family must appear beside ORB, VWAP and SerClick in common research outputs, but each Dan variant keeps its own strategy/variant identity.
 
@@ -332,6 +354,8 @@ The existing minimum-sample and production promotion rules continue to apply. A 
 
 Price buckets must not be collapsed after seeing test/forward results merely to improve reported performance.
 
+Swing results should support longer research windows than the current 60-session intraday baseline. Sixty sessions remains useful for engineering/smoke validation, but promotion evidence for 1-10 day holds should be based on substantially more history where data coverage permits.
+
 ## 12. Data and Lookahead Integrity
 
 No signal may use:
@@ -341,11 +365,12 @@ No signal may use:
 - future market-cap snapshots;
 - later-session retained-gain checkpoints;
 - next-day closing information for an overnight entry;
+- price outcomes from a later validation split for selecting a rule in an earlier split;
 - survivorship-biased future listing status when avoidable.
 
 Missing historical news/float/cap data is explicitly marked unknown.
 
-Corporate actions and split-adjustment consistency must be checked before swing returns are trusted.
+Corporate actions and split-adjustment consistency must be checked before swing returns are trusted. The chosen Alpaca adjustment mode must be explicit in run metadata so multi-day returns are auditable.
 
 ## 13. Integration Shape
 
@@ -360,15 +385,35 @@ scanner/strategies/dan_irish/
 └── swing.py
 ```
 
-Shared modifications should be minimal and focused:
+### 13.1 Candidate Discovery Isolation
 
-- `scanner/multistrategy/config.py` — broaden Dan research price support without changing existing ORB/VWAP locked behaviour;
-- `scanner/multistrategy/study.py` — expose/reuse common Dan candidate features and daily history inputs;
-- `scripts/run_strategy_research.py` — register `dan` strategy family and route same-session versus swing replay correctly;
+Do not widen the existing global `MultiStrategyConfig` price gate.
+
+Add a Dan-specific candidate function/config that can evaluate the full requested price spectrum. The shared study should build the union of symbols required by the selected families while retaining per-family qualification flags, for example:
+
+- `broad_candidate` — current ORB/VWAP qualification using the existing $1-$30 config;
+- `dan_candidate` — Dan-specific momentum/activity qualification with no research ceiling other than positive/finite price and tradable common-equity sanity checks.
+
+When `--strategy all` is requested, minute data may be fetched once for the union of qualified symbols, but dispatch must respect family flags:
+
+- ORB/VWAP generators receive only rows with `broad_candidate=true`;
+- Dan generators receive only rows with `dan_candidate=true`;
+- SerClick remains sourced through its existing adapter/baseline path.
+
+This reuses downloads without changing historical ORB/VWAP candidate populations.
+
+### 13.2 Shared Modifications
+
+Keep changes minimal and focused:
+
+- `scanner/multistrategy/study.py` — compute family-specific candidate flags, union candidate symbols for cache efficiency, expose daily/session history needed by Dan swing research;
+- `scripts/run_strategy_research.py` — register `dan`, route family-qualified contexts, and route same-session versus swing replay correctly;
 - `scanner/core/models.py` or a focused shared helper — canonical price bucket function;
-- `scanner/core/replay.py` only if a clean extension can support multi-session replay without destabilising intraday replay; otherwise add a focused multi-session replay module;
-- `scanner/core/reporting.py` / ranking layer only where required to include the new segmentation columns and Dan variants;
+- `scanner/core/replay.py` only if a clean extension can support multi-session replay without destabilising intraday replay; otherwise add `scanner/core/swing_replay.py`;
+- `scanner/core/reporting.py` / ranking layer only where required to add segmentation and censoring fields;
 - tests mirror existing API-free synthetic strategy tests.
+
+`scanner/multistrategy/config.py` should retain its current ORB/VWAP min/max price defaults. Dan-specific thresholds belong in `scanner/strategies/dan_irish/config.py`.
 
 Do not refactor unrelated SerClick code.
 
@@ -396,6 +441,7 @@ Add or extend:
 - `retained_gain_summary.csv`
 - `swing_hold_summary.csv`
 - `overnight_gap_risk.csv`
+- `censoring_summary.csv`
 - multi-day peak timing fields in common replay/summary output.
 
 ## 15. Verification Requirements
@@ -410,6 +456,7 @@ python -m compileall -q scanner scripts
 New tests must demonstrate:
 
 - price bucket boundaries including below $1 and $100+;
+- Dan candidate discovery does not change ORB/VWAP $1-$30 candidate behaviour;
 - retained gain calculation and zero/invalid denominator handling;
 - no signal before consolidation/confirmation is complete;
 - next-bar intraday entry;
@@ -417,6 +464,8 @@ New tests must demonstrate:
 - gap-through-stop behaviour uses first executable observed price;
 - Day-2 rules cannot access later Day-2 bars;
 - multi-day base-length rules are isolated;
+- validation swing outcomes cannot consume locked-test prices;
+- incomplete final-date swing horizons are right-censored rather than treated as completed exits;
 - separate variant/rule identities in reporting;
 - existing ORB/VWAP/SerClick synthetic integration tests remain unchanged and passing;
 - the frozen SerClick baseline cut-off remains 2026-08-27.
@@ -431,7 +480,7 @@ Implementation is successful when:
 2. Intraday and swing Dan variants are statistically isolated in common outputs.
 3. All eight price buckets appear in segmentation when observations exist.
 4. Retained-gain features are timestamp-safe and auditable.
-5. Multi-session replay correctly handles overnight gaps and trading-day hold horizons.
-6. Existing ORB, VWAP and SerClick outputs remain compatible.
+5. Multi-session replay correctly handles overnight gaps, trading-day hold horizons and split-boundary/right censoring.
+6. Existing ORB, VWAP and SerClick candidate populations and outputs remain compatible.
 7. No Dan rule is labelled validated until it passes the existing chronology, sample-size and promotion gates.
 8. Swing variants remain labelled Dan-inspired unless direct public evidence supports stronger attribution.

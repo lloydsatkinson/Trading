@@ -1,0 +1,43 @@
+name: Dan Followup Batch Patch
+
+on:
+  push:
+    branches:
+      - dan-irish-research-v1
+
+permissions:
+  contents: write
+
+jobs:
+  patch-followup-batching:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dan-irish-research-v1
+      - name: Batch followup cache requests by session
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('scanner/strategies/dan_irish/research.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''def ensure_dan_followup_caches(study, contexts: pd.DataFrame, daily_bars: pd.DataFrame, cfg: DanConfig | None = None) -> None:\n    cfg = cfg or DanConfig()\n    if contexts.empty or daily_bars.empty:\n        return\n    ensured: set[tuple[str, date]] = set()\n    for context in contexts.to_dict("records"):\n        symbol = str(context["symbol"])\n        day0 = pd.Timestamp(context["date"]).date()\n        later = [day for day in _daily_dates_for_symbol(daily_bars, symbol) if day > day0][: int(cfg.followup_sessions)]\n        for day in later:\n            key = (symbol, day)\n            if key in ensured:\n                continue\n            study.ensure_minute_day([symbol], day)\n            ensured.add(key)\n'''
+          new = '''def ensure_dan_followup_caches(study, contexts: pd.DataFrame, daily_bars: pd.DataFrame, cfg: DanConfig | None = None) -> None:\n    cfg = cfg or DanConfig()\n    if contexts.empty or daily_bars.empty:\n        return\n    symbols_by_day: dict[date, set[str]] = {}\n    for context in contexts.to_dict("records"):\n        symbol = str(context["symbol"])\n        day0 = pd.Timestamp(context["date"]).date()\n        later = [day for day in _daily_dates_for_symbol(daily_bars, symbol) if day > day0][: int(cfg.followup_sessions)]\n        for day in later:\n            symbols_by_day.setdefault(day, set()).add(symbol)\n    for day in sorted(symbols_by_day):\n        study.ensure_minute_day(sorted(symbols_by_day[day]), day)\n'''
+          if old not in text:
+              raise SystemExit('followup cache function block not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+      - name: Commit patch if needed
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No patch required"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scanner/strategies/dan_irish/research.py
+          git commit -m "perf: batch Dan followup cache requests by session"
+          git push origin HEAD:dan-irish-research-v1

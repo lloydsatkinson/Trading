@@ -189,6 +189,25 @@ def test_overnight_gap_risk_keeps_setup_and_exit_rule_identity_separate():
     assert np.isclose(rates["S15_T30_NONE_HS2"], 0.0)
 
 
+def _followup_daily(symbols=("AAA",), periods=20):
+    sessions = pd.bdate_range("2026-08-03", periods=periods)
+    daily = pd.DataFrame([
+        {
+            "symbol": symbol,
+            "timestamp": pd.Timestamp(f"{day.date()} 16:00", tz="America/New_York").tz_convert("UTC"),
+            "open": 5.0,
+            "high": 5.2,
+            "low": 4.9,
+            "close": 5.1,
+            "volume": 1000,
+            "vwap": 5.05,
+        }
+        for symbol in symbols
+        for day in sessions
+    ])
+    return sessions, daily
+
+
 def test_followup_cache_depth_covers_five_day_base_plus_ten_session_hold():
     class FakeStudy:
         def __init__(self):
@@ -198,22 +217,31 @@ def test_followup_cache_depth_covers_five_day_base_plus_ten_session_hold():
             self.calls.append((tuple(symbols), str(day)))
             return pd.DataFrame()
 
-    sessions = pd.bdate_range("2026-08-03", periods=20)
-    daily = pd.DataFrame([
-        {
-            "symbol": "AAA",
-            "timestamp": pd.Timestamp(f"{day.date()} 16:00", tz="America/New_York").tz_convert("UTC"),
-            "open": 5.0,
-            "high": 5.2,
-            "low": 4.9,
-            "close": 5.1,
-            "volume": 1000,
-            "vwap": 5.05,
-        }
-        for day in sessions
-    ])
+    sessions, daily = _followup_daily()
     contexts = pd.DataFrame([{"symbol": "AAA", "date": str(sessions[0].date())}])
     study = FakeStudy()
 
     ensure_dan_followup_caches(study, contexts, daily, DanConfig())
     assert len(study.calls) == 16
+
+
+def test_followup_cache_batches_symbols_by_session():
+    class FakeStudy:
+        def __init__(self):
+            self.calls = []
+
+        def ensure_minute_day(self, symbols, day):
+            self.calls.append((tuple(symbols), str(day)))
+            return pd.DataFrame()
+
+    sessions, daily = _followup_daily(symbols=("AAA", "BBB"))
+    contexts = pd.DataFrame([
+        {"symbol": "AAA", "date": str(sessions[0].date())},
+        {"symbol": "BBB", "date": str(sessions[0].date())},
+    ])
+    study = FakeStudy()
+
+    ensure_dan_followup_caches(study, contexts, daily, DanConfig())
+
+    assert len(study.calls) == 16
+    assert all(symbols == ("AAA", "BBB") for symbols, _ in study.calls)

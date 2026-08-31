@@ -2,6 +2,7 @@ import math
 
 import pandas as pd
 
+import scanner.core.multisession_replay as multisession_replay
 from scanner.core.multisession_replay import (
     SwingReplayRule,
     replay_swing_signal_grid,
@@ -134,3 +135,28 @@ def test_complete_hold_records_peak_timing_and_terminal_close():
     assert result.exit_price == 11.1
     assert result.trading_days_to_peak in {1, 2}
     assert result.calendar_days_to_peak >= result.trading_days_to_peak
+
+
+def test_swing_grid_prepares_shared_bars_once(monkeypatch):
+    calls = 0
+    original = multisession_replay._prepare_bars
+
+    def counted(frame):
+        nonlocal calls
+        calls += 1
+        return original(frame)
+
+    monkeypatch.setattr(multisession_replay, "_prepare_bars", counted)
+    out = replay_swing_signal_grid(
+        multi_day_bars(),
+        signal(),
+        rules=[
+            SwingReplayRule(stop_pct=.10, target_pct=.20, max_hold_sessions=1),
+            SwingReplayRule(stop_pct=.10, target_pct=.30, max_hold_sessions=2),
+            SwingReplayRule(stop_pct=.15, target_pct=.40, max_hold_sessions=3),
+        ],
+        split_end_date="2026-09-03",
+        available_end_date="2026-09-03",
+    )
+    assert len(out) == 3
+    assert calls == 1

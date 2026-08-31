@@ -457,5 +457,6 @@ class MultiStrategyStudy:
                 "dan_candidate_contexts": dan_df,
                 "daily_bars": daily,
                 "split_end_dates": _split_end_dates(split_map),
+                "session_splits": {str(day): str(split) for day, split in split_map.items()},
             })
         return result

@@ -58,7 +58,13 @@ def select_frozen_candidates(trades: pd.DataFrame, coarse: pd.DataFrame) -> pd.D
     ].copy()
     fh["candidate"] = "FAILED_HOD_BREAK_30_50_MIDDAY"
 
-    out = pd.concat([ssr, fh], ignore_index=True)
+    pop = x[
+        x["strategy"].eq("POP_AND_DROP")
+        & x["entry_vs_prev"].ge(0.75)
+    ].copy()
+    pop["candidate"] = "POP_AND_DROP_EXTREME_75_PLUS"
+
+    out = pd.concat([ssr, fh, pop], ignore_index=True)
     out["entry_ts"] = pd.to_datetime(out["entry_ts"], utc=True)
     return out.sort_values(["session_date", "candidate", "ticker"]).reset_index(drop=True)
 
@@ -220,7 +226,11 @@ def main() -> None:
     trades, coarse = _load_inputs(Path(a.input))
     candidates = select_frozen_candidates(trades, coarse)
     sessions = 60
-    expected = {"SSR_FLUSH_RECLAIM_RISK_3_5": 136, "FAILED_HOD_BREAK_30_50_MIDDAY": 97}
+    expected = {
+        "SSR_FLUSH_RECLAIM_RISK_3_5": 136,
+        "FAILED_HOD_BREAK_30_50_MIDDAY": 97,
+        "POP_AND_DROP_EXTREME_75_PLUS": 122,
+    }
     got = candidates.groupby("candidate").size().to_dict()
     if got != expected:
         raise RuntimeError(f"frozen candidate counts changed: expected={expected} got={got}")

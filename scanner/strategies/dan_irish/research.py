@@ -146,10 +146,22 @@ def replay_dan_swing_signals(
             : max_hold_sessions + 1
         ]
         minute_frames: list[pd.DataFrame] = []
+        missing_dates: list[date] = []
         for day in relevant_dates:
             bars = minute_loader(root, "multistrategy_alpaca", str(day), feed, symbol)
-            if not bars.empty:
+            if bars.empty:
+                missing_dates.append(day)
+            else:
                 minute_frames.append(bars)
+        if missing_dates:
+            for missing_day in missing_dates:
+                skips.append({
+                    "symbol": symbol,
+                    "date": signal.get("date"),
+                    "reason": "MISSING_DAN_SWING_SESSION_CACHE",
+                    "missing_session": str(missing_day),
+                })
+            continue
         path = pd.concat(minute_frames, ignore_index=True, sort=False) if minute_frames else pd.DataFrame()
         if path.empty:
             skips.append({"symbol": symbol, "date": signal.get("date"), "reason": "MISSING_DAN_SWING_REPLAY_CACHE"})
@@ -334,7 +346,12 @@ def overnight_gap_risk_summary(swing_replays: pd.DataFrame, baseline_slippage_bp
     rows = []
     for keys, group in x.groupby(dims, dropna=False, sort=False):
         keys = keys if isinstance(keys, tuple) else (keys,)
-        gap = group["exit_reason"].astype(str).eq("GAP_STOP") if "exit_reason" in group.columns else pd.Series(False, index=group.index)
+        if "gap_through_stop" in group.columns:
+            gap = group["gap_through_stop"].fillna(False).astype(bool)
+        elif "exit_reason" in group.columns:
+            gap = group["exit_reason"].astype(str).eq("GAP_STOP")
+        else:
+            gap = pd.Series(False, index=group.index)
         gap_returns = pd.to_numeric(group.loc[gap, "return_pct"], errors="coerce").dropna()
         rows.append({
             **dict(zip(dims, keys)),

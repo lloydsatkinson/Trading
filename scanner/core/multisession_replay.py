@@ -100,6 +100,7 @@ class SwingReplayResult:
     r_multiple: float = np.nan
     trading_days_to_peak: float = np.nan
     calendar_days_to_peak: float = np.nan
+    gap_through_stop: bool = False
     boundary_censored: bool = False
     right_censored: bool = False
     selection_eligible_replay: bool = True
@@ -193,6 +194,7 @@ def _result_at(
     direction: str,
     entry_date,
     risk_pct: float | None,
+    gap_through_stop: bool = False,
 ) -> SwingReplayResult:
     window = path.iloc[:seen_count]
     mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
@@ -209,6 +211,7 @@ def _result_at(
         r_mult,
         trading_peak,
         calendar_peak,
+        gap_through_stop=bool(gap_through_stop),
     )
 
 
@@ -313,7 +316,10 @@ def _simulate_prepared_multisession_trade(
         if direction == "LONG":
             if effective_stop is not None and open_ <= effective_stop:
                 reason = stop_reason if stop_reason != "STOP" else "GAP_STOP"
-                return _result_at(reason, ts, open_, seen_count, path, entry, direction, entry_date, risk_pct)
+                return _result_at(
+                    reason, ts, open_, seen_count, path, entry, direction, entry_date, risk_pct,
+                    gap_through_stop=True,
+                )
             if target is not None and open_ >= target:
                 return _result_at("TARGET", ts, target, seen_count, path, entry, direction, entry_date, risk_pct)
             stop_hit = effective_stop is not None and low <= effective_stop
@@ -321,7 +327,10 @@ def _simulate_prepared_multisession_trade(
         else:
             if effective_stop is not None and open_ >= effective_stop:
                 reason = stop_reason if stop_reason != "STOP" else "GAP_STOP"
-                return _result_at(reason, ts, open_, seen_count, path, entry, direction, entry_date, risk_pct)
+                return _result_at(
+                    reason, ts, open_, seen_count, path, entry, direction, entry_date, risk_pct,
+                    gap_through_stop=True,
+                )
             if target is not None and open_ <= target:
                 return _result_at("TARGET", ts, target, seen_count, path, entry, direction, entry_date, risk_pct)
             stop_hit = effective_stop is not None and high >= effective_stop

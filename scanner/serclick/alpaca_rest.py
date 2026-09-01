@@ -113,6 +113,67 @@ class AlpacaRest:
             df["date"] = pd.to_datetime(df["date"]).dt.date
         return df
 
+    def corporate_actions(
+        self,
+        symbols: Iterable[str],
+        start: datetime | str,
+        end: datetime | str,
+        types: Iterable[str] = ("reverse_split", "forward_split", "unit_split"),
+        limit: int = 1_000,
+    ) -> pd.DataFrame:
+        symbols = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+        action_types = [str(value).strip() for value in types if str(value).strip()]
+        if not symbols or not action_types:
+            return pd.DataFrame(columns=["symbol", "action_type", "action_date"])
+
+        params = {
+            "symbols": ",".join(symbols),
+            "types": ",".join(action_types),
+            "start": str(pd.Timestamp(start).date()),
+            "end": str(pd.Timestamp(end).date()),
+            "sort": "asc",
+            "limit": int(limit),
+        }
+        key_to_type = {
+            "reverse_splits": "reverse_split",
+            "forward_splits": "forward_split",
+            "unit_splits": "unit_split",
+        }
+        rows: list[dict] = []
+        page_token: str | None = None
+        while True:
+            if page_token:
+                params["page_token"] = page_token
+            else:
+                params.pop("page_token", None)
+            payload = self._get(f"{self.creds.data_base}/v1/corporate-actions", params=params)
+            if not isinstance(payload, dict):
+                raise AlpacaError(f"Unexpected corporate-actions payload: {type(payload)!r}")
+            groups = payload.get("corporate_actions") or {}
+            if not isinstance(groups, dict):
+                raise AlpacaError(f"Unexpected corporate_actions body: {type(groups)!r}")
+            for key, items in groups.items():
+                action_type = key_to_type.get(str(key))
+                if action_type is None or action_type not in action_types:
+                    continue
+                for item in items or []:
+                    row = dict(item)
+                    row["action_type"] = action_type
+                    row["action_date"] = row.get("ex_date") or row.get("process_date") or row.get("record_date")
+                    rows.append(row)
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+
+        if not rows:
+            return pd.DataFrame(columns=["symbol", "action_type", "action_date"])
+        out = pd.DataFrame(rows)
+        if "symbol" not in out.columns:
+            out["symbol"] = None
+        out["symbol"] = out["symbol"].astype(str).str.upper()
+        out["action_date"] = pd.to_datetime(out["action_date"], errors="coerce").dt.date
+        return out.sort_values(["symbol", "action_date", "action_type"]).reset_index(drop=True)
+
     def stock_bars(
         self,
         symbols: Iterable[str],

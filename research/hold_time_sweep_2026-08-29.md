@@ -39,3 +39,7 @@ Using $1,000 notional per qualifying trade, fixed 50% stop, original targets, 20
 - Combined: **+$3,742.30** over 60 sessions (~**+$62.37/session**), before historical short borrow/locate fees and without assuming scalability.
 
 These are research backtest results, not profit forecasts. Short borrow/locate availability and halt/gap-through-stop risk remain execution constraints.
+
+## 2026-09-01 extension
+
+A third frozen research candidate has now been added: **POP_AND_DROP_EXTREME_75_PLUS**, requiring the short entry to remain at least 75% above the prior close. The next serialized hold sweep reruns all three candidates under the same 50% emergency-stop assumptions while keeping the final 2026-08-12 through 2026-08-27 block sealed.

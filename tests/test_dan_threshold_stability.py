@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from scanner.strategies.dan_irish.research import summarize_dan_threshold_stability
+from scanner.strategies.dan_irish.stability import summarize_dan_threshold_stability
 
 
 def _row(**overrides):

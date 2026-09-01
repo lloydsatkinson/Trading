@@ -88,6 +88,127 @@ def _next_bar_breakout(
     return None
 
 
+def _pre_entry_atr(daily: pd.DataFrame, entry_timestamp: Any, lookback: int = 14) -> float:
+    entry_date = pd.Timestamp(entry_timestamp).date()
+    completed = daily[daily["session_date"].lt(entry_date)].copy().tail(max(1, int(lookback)))
+    if completed.empty:
+        return np.nan
+    high = pd.to_numeric(completed["high"], errors="coerce")
+    low = pd.to_numeric(completed["low"], errors="coerce")
+    close = pd.to_numeric(completed["close"], errors="coerce")
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1, skipna=True)
+    valid = true_range.replace([np.inf, -np.inf], np.nan).dropna()
+    return float(valid.mean()) if not valid.empty else np.nan
+
+
+def _volume_weighted_state(bars: pd.DataFrame) -> tuple[float, float, float]:
+    if bars.empty:
+        return np.nan, 0.0, 0.0
+    volume = pd.to_numeric(bars.get("volume"), errors="coerce").fillna(0.0)
+    typical = (
+        pd.to_numeric(bars["high"], errors="coerce")
+        + pd.to_numeric(bars["low"], errors="coerce")
+        + pd.to_numeric(bars["close"], errors="coerce")
+    ) / 3.0
+    if "vwap" in bars.columns:
+        supplied = pd.to_numeric(bars["vwap"], errors="coerce")
+        price = supplied.where(supplied.gt(0), typical)
+    else:
+        price = typical
+    pv = float((volume * price).fillna(0.0).sum())
+    total_volume = float(volume.sum())
+    avwap = pv / total_volume if total_volume > 0 else np.nan
+    return float(avwap) if np.isfinite(avwap) else np.nan, pv, total_volume
+
+
+def _pre_entry_state(
+    daily: pd.DataFrame,
+    day0_context: dict[str, Any],
+    minute_loader: MinuteLoader,
+    symbol: str,
+    day0_date: date,
+    entry_row: pd.Series,
+    day0_low: float,
+    cfg: DanConfig,
+) -> dict[str, float]:
+    entry_ts = pd.Timestamp(entry_row["timestamp_et"])
+    entry_date = entry_ts.date()
+    completed = daily[daily["session_date"].lt(entry_date)].copy()
+    prior_day_low = (
+        float(completed.iloc[-1]["low"])
+        if not completed.empty and np.isfinite(float(completed.iloc[-1]["low"]))
+        else np.nan
+    )
+
+    day0_minutes = _minutes(minute_loader, symbol, day0_date)
+    known_day0 = day0_minutes[day0_minutes["timestamp_et"].lt(entry_ts)].copy() if not day0_minutes.empty else pd.DataFrame()
+    if entry_date > day0_date:
+        day0_support = float(day0_low)
+    elif not known_day0.empty:
+        day0_support = float(pd.to_numeric(known_day0["low"], errors="coerce").min())
+    else:
+        day0_support = np.nan
+
+    prior_close = _number(day0_context.get("prior_close"))
+    ignition_ts = None
+    if prior_close is not None and prior_close > 0 and not day0_minutes.empty:
+        threshold = prior_close * (1.0 + float(cfg.min_reference_extension_pct))
+        ignition = day0_minutes[pd.to_numeric(day0_minutes["high"], errors="coerce").ge(threshold)]
+        if not ignition.empty:
+            ignition_ts = ignition.iloc[0]["timestamp_et"]
+    if ignition_ts is None and not day0_minutes.empty:
+        ignition_ts = day0_minutes.iloc[0]["timestamp_et"]
+
+    anchor_frames: list[pd.DataFrame] = []
+    if ignition_ts is not None:
+        relevant_days = [
+            value for value in daily["session_date"].tolist()
+            if day0_date <= value <= entry_date
+        ]
+        if day0_date not in relevant_days:
+            relevant_days.insert(0, day0_date)
+        if entry_date not in relevant_days:
+            relevant_days.append(entry_date)
+        for day in sorted(set(relevant_days)):
+            bars = day0_minutes if day == day0_date else _minutes(minute_loader, symbol, day)
+            if bars.empty:
+                continue
+            eligible = bars[
+                bars["timestamp_et"].ge(pd.Timestamp(ignition_ts))
+                & bars["timestamp_et"].lt(entry_ts)
+            ].copy()
+            if not eligible.empty:
+                anchor_frames.append(eligible)
+    anchor_bars = pd.concat(anchor_frames, ignore_index=True, sort=False) if anchor_frames else pd.DataFrame()
+    anchored_vwap, anchor_pv, anchor_volume = _volume_weighted_state(anchor_bars)
+
+    entry_day_minutes = _minutes(minute_loader, symbol, entry_date)
+    before_entry = entry_day_minutes[entry_day_minutes["timestamp_et"].lt(entry_ts)] if not entry_day_minutes.empty else pd.DataFrame()
+    entry_session_low = (
+        float(pd.to_numeric(before_entry["low"], errors="coerce").min())
+        if not before_entry.empty
+        else np.nan
+    )
+
+    return {
+        "prior_day_low": prior_day_low,
+        "day0_support": day0_support,
+        "pre_entry_atr": _pre_entry_atr(daily, entry_ts),
+        "anchored_vwap_at_entry": anchored_vwap,
+        "anchored_vwap_seed_pv": anchor_pv,
+        "anchored_vwap_seed_volume": anchor_volume,
+        "entry_session_low_at_entry": entry_session_low,
+    }
+
+
 def _split_for_signal(
     context: dict[str, Any],
     signal_row: pd.Series,
@@ -118,10 +239,12 @@ def _emit(
     base_length_sessions: int | None,
     cfg: DanConfig,
     session_splits: dict[str, str] | None = None,
+    pre_entry_state: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     cap = _number(context.get("market_cap"))
     float_shares = _number(context.get("float_shares"))
     raw_entry = float(entry_row["open"])
+    state = pre_entry_state or {}
     record = SignalRecord(
         strategy_id="DAN_IRISH",
         variant_id=variant_id,
@@ -150,6 +273,7 @@ def _emit(
             "base_low": base_low,
             "base_high": base_high,
             "base_length_sessions": base_length_sessions,
+            **state,
         },
     ).to_dict()
     record.update({
@@ -167,6 +291,7 @@ def _emit(
         "pm_gap_pct": context.get("pm_gap_pct"),
         "pm_dollar_turnover": context.get("pm_dollar_turnover"),
         "opening_rvol": context.get("opening_rvol"),
+        **state,
     })
     return record
 
@@ -205,6 +330,18 @@ def generate_dan_swing_signals(
     ):
         return pd.DataFrame()
 
+    def state_for(entry_row: pd.Series) -> dict[str, float]:
+        return _pre_entry_state(
+            daily,
+            day0_context,
+            minute_loader,
+            symbol,
+            day0_date,
+            entry_row,
+            day0_low,
+            cfg,
+        )
+
     rows: list[dict[str, Any]] = []
     day0_minutes = _minutes(minute_loader, symbol, day0_date)
 
@@ -230,6 +367,7 @@ def generate_dan_swing_signals(
                         signal, entry, day0_low, day0_hod, day0_retained,
                         "OVERNIGHT_CLOSE", day0_low, day0_hod, None, cfg,
                         session_splits=session_splits,
+                        pre_entry_state=state_for(entry),
                     ))
                     break
 
@@ -245,6 +383,7 @@ def generate_dan_swing_signals(
                 signal, entry, day0_low, day0_hod, day0_retained,
                 "OVERNIGHT_AH", day0_low, day0_hod, None, cfg,
                 session_splits=session_splits,
+                pre_entry_state=state_for(entry),
             ))
 
     followup = daily.iloc[day0_idx + 1:].reset_index(drop=True)
@@ -262,6 +401,7 @@ def generate_dan_swing_signals(
             day0, entry, day0_low, day0_hod, day0_retained,
             "OVERNIGHT_NEXT_OPEN", day0_low, day0_hod, None, cfg,
             session_splits=session_splits,
+            pre_entry_state=state_for(entry),
         ))
 
         # Day-2 continuation base is frozen after the configured number of opening bars.
@@ -279,6 +419,7 @@ def generate_dan_swing_signals(
                     signal, entry, base_low, day0_hod, day0_retained,
                     "DAY2", base_low, base_high, 1, cfg,
                     session_splits=session_splits,
+                    pre_entry_state=state_for(entry),
                 ))
 
     # Multi-day compression bases contain completed daily sessions only. The breakout session is never in its own base.
@@ -301,6 +442,7 @@ def generate_dan_swing_signals(
             signal, entry, base_low, day0_hod, day0_retained,
             "MULTIDAY", base_low, base_high, base_length, cfg,
             session_splits=session_splits,
+            pre_entry_state=state_for(entry),
         ))
 
     return pd.DataFrame(rows)

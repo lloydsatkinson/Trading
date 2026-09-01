@@ -42,6 +42,56 @@ def test_stock_bars_skips_invalid_symbol_and_keeps_valid_symbols(monkeypatch):
     assert api.session.calls[1][1]["symbols"] == "AAPL"
 
 
+def test_corporate_actions_flattens_split_events_and_paginates(monkeypatch):
+    api = AlpacaRest(AlpacaCredentials("key", "secret"), pause_seconds=0)
+    calls = []
+
+    def fake_get(url, params=None):
+        params = dict(params or {})
+        calls.append((url, params))
+        if not params.get("page_token"):
+            return {
+                "corporate_actions": {
+                    "reverse_splits": [{
+                        "id": "rs1",
+                        "symbol": "AAA",
+                        "ex_date": "2026-08-31",
+                        "old_rate": 10,
+                        "new_rate": 1,
+                    }]
+                },
+                "next_page_token": "page-2",
+            }
+        return {
+            "corporate_actions": {
+                "forward_splits": [{
+                    "id": "fs1",
+                    "symbol": "BBB",
+                    "ex_date": "2026-09-01",
+                    "old_rate": 1,
+                    "new_rate": 2,
+                }]
+            },
+            "next_page_token": None,
+        }
+
+    monkeypatch.setattr(api, "_get", fake_get)
+    out = api.corporate_actions(
+        ["AAA", "BBB"],
+        start="2026-08-28",
+        end="2026-09-02",
+        types=("reverse_split", "forward_split"),
+    )
+
+    assert len(calls) == 2
+    assert calls[0][0].endswith("/v1/corporate-actions")
+    assert calls[0][1]["symbols"] == "AAA,BBB"
+    assert calls[0][1]["types"] == "reverse_split,forward_split"
+    assert calls[1][1]["page_token"] == "page-2"
+    assert set(out["action_type"]) == {"reverse_split", "forward_split"}
+    assert set(out["action_date"].astype(str)) == {"2026-08-31", "2026-09-01"}
+
+
 def test_credentials_load_project_root_dotenv_when_shell_vars_missing(monkeypatch, tmp_path):
     for name in ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "ALPACA_API_KEY", "ALPACA_API_SECRET", "ALPACA_KEY_ID", "ALPACA_SECRET_KEY", "APCA_API_BASE_URL", "ALPACA_DATA_BASE_URL"):
         monkeypatch.delenv(name, raising=False)

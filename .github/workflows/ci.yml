@@ -118,3 +118,33 @@ jobs:
           name: hold-sweep-results
           path: output/hold_sweep/
           retention-days: 14
+
+  parameter-sweep-research:
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[param-sweep-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: intraday-small-cap-results
+          path: input/intraday
+          github-token: ${{ github.token }}
+          repository: lloydsatkinson/Trading
+          run-id: 33214478726
+      - name: Replay stop and hold parameter grid from one SIP data pass
+        run: python -m scripts.run_fixed_stop_replay --input input/intraday --output output/parameter_sweep --stop-sweep 0.05,0.075,0.10,0.125,0.15,0.20,0.30,0.50 --slip-bps 20 --hold-sweep 10,15,20,30,45,60,90,120,180 --feed sip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parameter-sweep-results
+          path: output/parameter_sweep/
+          retention-days: 14

@@ -117,6 +117,19 @@ class _FakeDanStudy:
             "dan_candidate_contexts": _dan_contexts(),
             "daily_bars": _daily_bars(),
             "split_end_dates": {"validation": "2026-09-02"},
+            "session_splits": {
+                "2026-08-28": "validation",
+                "2026-08-31": "validation",
+                "2026-09-01": "validation",
+                "2026-09-02": "validation",
+            },
+            "corporate_actions": pd.DataFrame([{
+                "symbol": "AAA",
+                "action_type": "reverse_split",
+                "action_date": "2026-08-31",
+            }]),
+            "corporate_action_audit_status": "OK",
+            "bar_adjustment": "raw",
             "minute_files": [],
             "output_dir": str(self.root / "data" / "research" / "multistrategy" / "synthetic_dan"),
         }
@@ -183,6 +196,11 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
     dan_replays = result.replays[result.replays["strategy_id"].eq("DAN_IRISH")]
     assert "exit_rule_id" in dan_replays.columns
     assert dan_replays["rule_id"].astype(str).str.contains("__", regex=False).all()
+    swing_replays = dan_replays[dan_replays["_replay_mode"].eq("swing")]
+    assert "corporate_action_flag" in swing_replays.columns
+    assert swing_replays["corporate_action_flag"].fillna(False).astype(bool).any()
+    flagged = swing_replays[swing_replays["corporate_action_flag"].fillna(False).astype(bool)]
+    assert not flagged["selection_eligible_replay"].fillna(True).astype(bool).any()
 
     expected = {
         "price_bucket_summary.csv",
@@ -197,3 +215,4 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
 
     meta = json.loads((result.output_dir / "run_meta.json").read_text(encoding="utf-8"))
     assert meta["market_data_adjustment"] == "raw"
+    assert meta["corporate_action_audit_status"] == "OK"

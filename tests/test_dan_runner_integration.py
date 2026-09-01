@@ -5,6 +5,7 @@ import pandas as pd
 
 import scripts.run_strategy_research as runner
 from scanner.core.multisession_replay import SwingReplayRule
+from scanner.core.replay import ReplayRule
 from scanner.strategies.dan_irish.intraday import generate_dan_intraday_signal_grid as _real_dan_intraday_grid
 
 
@@ -145,11 +146,24 @@ def _blocked_http(*args, **kwargs):
 
 
 def _integration_rules(signal):
-    # The complete Dan rule grid is asserted independently. Integration only
+    # The complete Dan swing rule grid is asserted independently. Integration only
     # needs representative 1- and 2-session rules to prove real replay/censoring.
     return [
         SwingReplayRule(stop_pct=0.08, target_r_multiple=2.0, max_hold_sessions=1),
         SwingReplayRule(stop_pct=0.08, target_r_multiple=2.0, max_hold_sessions=2),
+    ]
+
+
+def _integration_intraday_rules(signal, serclick=False):
+    # The exhaustive intraday exit matrix is covered by replay/rule tests. Keep
+    # two distinct rule families here so the runner wiring remains realistic.
+    return [
+        ReplayRule(stop_pct=0.08, target_pct=0.10, max_hold_minutes=30),
+        ReplayRule(
+            stop_price=float(signal["stop_reference"]),
+            target_r_multiple=2.0,
+            max_hold_minutes=30,
+        ),
     ]
 
 
@@ -164,6 +178,18 @@ def _integration_intraday_grid(bars, context, cfg=None):
         breakout_references=("BASE_HIGH", "HOD"),
         volume_ratios=(1.0,),
     )
+
+
+def _integration_threshold_summary(replays):
+    # Threshold-grid combinatorics are validated in test_dan_threshold_grid.py.
+    # This smoke test only proves the runner exports a non-empty Dan threshold artifact.
+    if replays.empty:
+        return pd.DataFrame()
+    return pd.DataFrame([{
+        "strategy_id": "DAN_IRISH",
+        "variant_id": str(replays.iloc[0]["variant_id"]),
+        "n": int(len(replays)),
+    }])
 
 
 def test_parse_strategies_supports_dan_and_all():
@@ -183,6 +209,8 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
         frame.to_csv(cache / f"{day}_sip.csv.gz", index=False, compression="gzip")
 
     monkeypatch.setattr(runner, "MultiStrategyStudy", _FakeDanStudy)
+    monkeypatch.setattr(runner, "default_rules_for_signal", _integration_intraday_rules)
+    monkeypatch.setattr(runner, "summarize_dan_threshold_grid", _integration_threshold_summary)
     monkeypatch.setattr("scanner.strategies.dan_irish.research.default_dan_swing_rules", _integration_rules)
     monkeypatch.setattr("scanner.strategies.dan_irish.research.generate_dan_intraday_signal_grid", _integration_intraday_grid)
     monkeypatch.setattr("requests.sessions.Session.request", _blocked_http)

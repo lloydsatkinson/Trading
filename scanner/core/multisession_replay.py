@@ -56,16 +56,24 @@ class SwingReplayRule:
     target_r_multiple: float | None = None
     trailing_exit: str | None = None
     max_hold_sessions: int = 1
+    anchor_pv: float | None = None
+    anchor_volume: float | None = None
+    entry_session_low: float | None = None
 
     @property
     def rule_id(self) -> str:
         mode = str(self.stop_mode or "PCT").upper()
         if self.stop_price is not None:
-            stop = "SSTRUCT" if mode != "PCT" else f"SP{float(self.stop_price):.4f}"
+            if mode == "PCT":
+                stop = f"SP{float(self.stop_price):.4f}"
+            elif mode == "ATR" and self.atr_multiple is not None:
+                stop = f"SATR{float(self.atr_multiple):g}_P{float(self.stop_price):.4f}"
+            else:
+                stop = f"S{mode}_P{float(self.stop_price):.4f}"
         elif self.stop_pct is not None:
             stop = f"S{int(round(float(self.stop_pct) * 100)):02d}"
         elif self.atr_multiple is not None:
-            stop = f"ATR{float(self.atr_multiple):g}"
+            stop = f"SATR{float(self.atr_multiple):g}"
         else:
             stop = f"S{mode}"
         if self.target_price is not None:
@@ -153,6 +161,57 @@ def _censored(reason: str, *, boundary: bool = False, right: bool = False) -> Sw
     )
 
 
+def _bar_vwap_reference(row: pd.Series) -> float:
+    value = row.get("vwap")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = np.nan
+    if np.isfinite(number) and number > 0:
+        return number
+    return (float(row["high"]) + float(row["low"]) + float(row["close"])) / 3.0
+
+
+def _completed_session_lows(regular: pd.DataFrame) -> dict[object, float]:
+    if regular.empty:
+        return {}
+    out: dict[object, float] = {}
+    for day, group in regular.groupby("session_date", sort=True):
+        low = pd.to_numeric(group["low"], errors="coerce").min()
+        if pd.notna(low):
+            out[day] = float(low)
+    return out
+
+
+def _result_at(
+    reason: str,
+    ts: pd.Timestamp,
+    exit_price: float,
+    seen_count: int,
+    path: pd.DataFrame,
+    entry: float,
+    direction: str,
+    entry_date,
+    risk_pct: float | None,
+) -> SwingReplayResult:
+    window = path.iloc[:seen_count]
+    mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
+    ret = raw_return_pct(entry, float(exit_price), direction)
+    r_mult = ret / risk_pct if risk_pct else np.nan
+    return SwingReplayResult(
+        reason,
+        ts,
+        float(exit_price),
+        ret,
+        seen_count,
+        mfe,
+        mae,
+        r_mult,
+        trading_peak,
+        calendar_peak,
+    )
+
+
 def _simulate_prepared_multisession_trade(
     x: pd.DataFrame,
     entry_price: float,
@@ -196,57 +255,106 @@ def _simulate_prepared_multisession_trade(
         return SwingReplayResult("NO_DATA", None, np.nan, np.nan, 0, selection_eligible_replay=False)
 
     stop, target, risk_pct = _levels(entry, direction, rule)
+    trailing = str(rule.trailing_exit or "NONE").upper()
+    session_lows = _completed_session_lows(regular)
+    session_dates = sorted(session_lows)
+    previous_session: dict[object, object] = {
+        session_dates[i]: session_dates[i - 1] for i in range(1, len(session_dates))
+    }
+    dynamic_stop: float | None = None
+    current_day = None
+
+    seed_pv = float(rule.anchor_pv) if rule.anchor_pv is not None and np.isfinite(float(rule.anchor_pv)) else 0.0
+    seed_volume = float(rule.anchor_volume) if rule.anchor_volume is not None and np.isfinite(float(rule.anchor_volume)) else 0.0
+    anchor_pv = seed_pv if seed_pv > 0 and seed_volume > 0 else 0.0
+    anchor_volume = seed_volume if seed_pv > 0 and seed_volume > 0 else 0.0
+
     seen_count = 0
     for _, row in path.iterrows():
         seen_count += 1
         open_ = float(row["open"])
         high = float(row["high"])
         low = float(row["low"])
+        close = float(row["close"])
         ts = row["timestamp_et"]
+        row_day = row["session_date"]
+
+        if row_day != current_day:
+            current_day = row_day
+            prev_day = previous_session.get(row_day)
+            prev_low = session_lows.get(prev_day) if prev_day is not None else None
+            if prev_low is not None and row_day > entry_date:
+                if trailing == "PRIOR_DAY_LOW_BREAK":
+                    if direction == "LONG":
+                        dynamic_stop = max(float(prev_low), float(stop)) if stop is not None else float(prev_low)
+                    else:
+                        dynamic_stop = min(float(prev_low), float(stop)) if stop is not None else float(prev_low)
+                elif trailing == "TRAILING_HIGHER_LOW":
+                    candidate = float(prev_low)
+                    if dynamic_stop is None:
+                        dynamic_stop = float(stop) if stop is not None else candidate
+                    dynamic_stop = max(dynamic_stop, candidate) if direction == "LONG" else min(dynamic_stop, candidate)
+
+        effective_stop = stop
+        stop_reason = "STOP"
+        if dynamic_stop is not None:
+            if effective_stop is None:
+                effective_stop = dynamic_stop
+                stop_reason = trailing
+            elif direction == "LONG" and dynamic_stop > effective_stop:
+                effective_stop = dynamic_stop
+                stop_reason = trailing
+            elif direction == "SHORT" and dynamic_stop < effective_stop:
+                effective_stop = dynamic_stop
+                stop_reason = trailing
+        if trailing == "BASE_FAILURE" and effective_stop is not None:
+            stop_reason = "BASE_FAILURE"
+
         if direction == "LONG":
-            if stop is not None and open_ <= stop:
-                window = path.iloc[:seen_count]
-                mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
-                ret = raw_return_pct(entry, open_, direction)
-                r_mult = ret / risk_pct if risk_pct else np.nan
-                return SwingReplayResult("GAP_STOP", ts, open_, ret, seen_count, mfe, mae, r_mult, trading_peak, calendar_peak)
+            if effective_stop is not None and open_ <= effective_stop:
+                reason = stop_reason if stop_reason != "STOP" else "GAP_STOP"
+                return _result_at(reason, ts, open_, seen_count, path, entry, direction, entry_date, risk_pct)
             if target is not None and open_ >= target:
-                window = path.iloc[:seen_count]
-                mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
-                ret = raw_return_pct(entry, target, direction)
-                r_mult = ret / risk_pct if risk_pct else np.nan
-                return SwingReplayResult("TARGET", ts, target, ret, seen_count, mfe, mae, r_mult, trading_peak, calendar_peak)
-            stop_hit = stop is not None and low <= stop
+                return _result_at("TARGET", ts, target, seen_count, path, entry, direction, entry_date, risk_pct)
+            stop_hit = effective_stop is not None and low <= effective_stop
             target_hit = target is not None and high >= target
         else:
-            if stop is not None and open_ >= stop:
-                window = path.iloc[:seen_count]
-                mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
-                ret = raw_return_pct(entry, open_, direction)
-                r_mult = ret / risk_pct if risk_pct else np.nan
-                return SwingReplayResult("GAP_STOP", ts, open_, ret, seen_count, mfe, mae, r_mult, trading_peak, calendar_peak)
+            if effective_stop is not None and open_ >= effective_stop:
+                reason = stop_reason if stop_reason != "STOP" else "GAP_STOP"
+                return _result_at(reason, ts, open_, seen_count, path, entry, direction, entry_date, risk_pct)
             if target is not None and open_ <= target:
-                window = path.iloc[:seen_count]
-                mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
-                ret = raw_return_pct(entry, target, direction)
-                r_mult = ret / risk_pct if risk_pct else np.nan
-                return SwingReplayResult("TARGET", ts, target, ret, seen_count, mfe, mae, r_mult, trading_peak, calendar_peak)
-            stop_hit = stop is not None and high >= stop
+                return _result_at("TARGET", ts, target, seen_count, path, entry, direction, entry_date, risk_pct)
+            stop_hit = effective_stop is not None and high >= effective_stop
             target_hit = target is not None and low <= target
 
         if stop_hit:
-            window = path.iloc[:seen_count]
-            mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
-            reason = "STOP_SAME_BAR" if target_hit else "STOP"
-            ret = raw_return_pct(entry, stop, direction)
-            r_mult = ret / risk_pct if risk_pct else np.nan
-            return SwingReplayResult(reason, ts, float(stop), ret, seen_count, mfe, mae, r_mult, trading_peak, calendar_peak)
+            if stop_reason != "STOP":
+                reason = stop_reason
+            else:
+                reason = "STOP_SAME_BAR" if target_hit else "STOP"
+            return _result_at(reason, ts, float(effective_stop), seen_count, path, entry, direction, entry_date, risk_pct)
         if target_hit:
-            window = path.iloc[:seen_count]
-            mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(window, entry, direction, entry_date)
-            ret = raw_return_pct(entry, target, direction)
-            r_mult = ret / risk_pct if risk_pct else np.nan
-            return SwingReplayResult("TARGET", ts, float(target), ret, seen_count, mfe, mae, r_mult, trading_peak, calendar_peak)
+            return _result_at("TARGET", ts, float(target), seen_count, path, entry, direction, entry_date, risk_pct)
+
+        if trailing == "ANCHORED_VWAP_LOSS":
+            volume = float(row.get("volume", 0.0)) if pd.notna(row.get("volume", 0.0)) else 0.0
+            if volume > 0:
+                anchor_pv += volume * _bar_vwap_reference(row)
+                anchor_volume += volume
+            avwap = anchor_pv / anchor_volume if anchor_volume > 0 else np.nan
+            lost = np.isfinite(avwap) and (close < avwap if direction == "LONG" else close > avwap)
+            if lost:
+                return _result_at(
+                    "ANCHORED_VWAP_LOSS",
+                    ts,
+                    close,
+                    seen_count,
+                    path,
+                    entry,
+                    direction,
+                    entry_date,
+                    risk_pct,
+                )
 
     terminal = terminal_regular.iloc[-1]
     exit_price = float(terminal["close"])
@@ -254,7 +362,7 @@ def _simulate_prepared_multisession_trade(
     mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(path, entry, direction, entry_date)
     r_mult = ret / risk_pct if risk_pct else np.nan
     return SwingReplayResult(
-        "TIME", terminal["timestamp_et"], exit_price, ret, len(path),
+        "TIME", terminal["timestamp_et"], exit_price, len(path),
         mfe_pct=mfe, mae_pct=mae, r_multiple=r_mult,
         trading_days_to_peak=trading_peak, calendar_days_to_peak=calendar_peak,
     )

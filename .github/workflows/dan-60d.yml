@@ -1,5 +1,6 @@
 name: Dan 60D Research
 
+# Trigger marker: verified Dan branch ready for 60-session SIP research.
 on:
   workflow_dispatch:
     inputs:

@@ -5,12 +5,14 @@ on:
     branches:
       - dan-irish-research-v1
     paths:
+      - tests/test_alpaca_rest.py
       - tests/test_dan_dynamic_swing.py
       - tests/test_dan_market_data_integrity.py
       - scanner/core/multisession_replay.py
       - scanner/multistrategy/config.py
       - scanner/multistrategy/study.py
       - scanner/serclick/alpaca_rest.py
+      - scanner/strategies/dan_irish/corporate_actions.py
       - scanner/strategies/dan_irish/research.py
       - scanner/strategies/dan_irish/rules.py
       - scanner/strategies/dan_irish/swing.py
@@ -28,4 +30,4 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt
-      - run: PYTHONPATH=. pytest -q tests/test_dan_dynamic_swing.py tests/test_dan_market_data_integrity.py
+      - run: PYTHONPATH=. pytest -q tests/test_alpaca_rest.py tests/test_dan_dynamic_swing.py tests/test_dan_market_data_integrity.py

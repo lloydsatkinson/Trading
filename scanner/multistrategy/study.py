@@ -265,7 +265,15 @@ class MultiStrategyStudy:
             return out
         start = datetime.combine(sessions[0] - timedelta(days=14), time(0), ET).astimezone(UTC)
         end = datetime.combine(sessions[-1] + timedelta(days=1), time(0), ET).astimezone(UTC)
-        parts = [self.api.stock_bars(batch, "1Day", start, end, feed=self.feed, limit=self.cfg.api_limit) for batch in _chunks(symbols, self.cfg.symbol_batch_size)]
+        parts = [
+            self.api.stock_bars(
+                batch, "1Day", start, end,
+                feed=self.feed,
+                adjustment=self.cfg.bar_adjustment,
+                limit=self.cfg.api_limit,
+            )
+            for batch in _chunks(symbols, self.cfg.symbol_batch_size)
+        ]
         out = pd.concat([p for p in parts if not p.empty], ignore_index=True) if any(not p.empty for p in parts) else pd.DataFrame()
         out.to_csv(cache, index=False, compression="gzip")
         return out
@@ -287,7 +295,15 @@ class MultiStrategyStudy:
             return out
         start = datetime.combine(day, time(4), ET).astimezone(UTC)
         end = datetime.combine(day, time(10), ET).astimezone(UTC)
-        parts = [self.api.stock_bars(batch, self.cfg.early_scan_timeframe, start, end, feed=self.feed, limit=self.cfg.api_limit) for batch in _chunks(symbols, self.cfg.symbol_batch_size)]
+        parts = [
+            self.api.stock_bars(
+                batch, self.cfg.early_scan_timeframe, start, end,
+                feed=self.feed,
+                adjustment=self.cfg.bar_adjustment,
+                limit=self.cfg.api_limit,
+            )
+            for batch in _chunks(symbols, self.cfg.symbol_batch_size)
+        ]
         out = pd.concat([p for p in parts if not p.empty], ignore_index=True) if any(not p.empty for p in parts) else pd.DataFrame()
         out.to_csv(cache, index=False, compression="gzip")
         return out
@@ -315,7 +331,12 @@ class MultiStrategyStudy:
             start = datetime.combine(day, time(4), ET).astimezone(UTC)
             end = datetime.combine(day, time(20), ET).astimezone(UTC)
             parts = [
-                self.api.stock_bars(batch, self.cfg.minute_timeframe, start, end, feed=self.feed, limit=self.cfg.api_limit)
+                self.api.stock_bars(
+                    batch, self.cfg.minute_timeframe, start, end,
+                    feed=self.feed,
+                    adjustment=self.cfg.bar_adjustment,
+                    limit=self.cfg.api_limit,
+                )
                 for batch in _chunks(missing, min(self.cfg.symbol_batch_size, 100))
             ]
             fresh = pd.concat([part for part in parts if not part.empty], ignore_index=True) if any(not part.empty for part in parts) else pd.DataFrame()
@@ -346,7 +367,15 @@ class MultiStrategyStudy:
             return pd.read_csv(cache)
         start = datetime.combine(start_day, time(9, 30), ET).astimezone(UTC)
         end = datetime.combine(through_day, time(9, 36), ET).astimezone(UTC)
-        parts = [self.api.stock_bars(batch, self.cfg.opening_history_timeframe, start, end, feed=self.feed, limit=self.cfg.api_limit) for batch in _chunks(symbols, min(self.cfg.symbol_batch_size, 100))]
+        parts = [
+            self.api.stock_bars(
+                batch, self.cfg.opening_history_timeframe, start, end,
+                feed=self.feed,
+                adjustment=self.cfg.bar_adjustment,
+                limit=self.cfg.api_limit,
+            )
+            for batch in _chunks(symbols, min(self.cfg.symbol_batch_size, 100))
+        ]
         raw = pd.concat([p for p in parts if not p.empty], ignore_index=True) if any(not p.empty for p in parts) else pd.DataFrame()
         rows: list[dict[str, Any]] = []
         if not raw.empty:

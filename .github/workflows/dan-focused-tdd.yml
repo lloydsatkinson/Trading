@@ -1,0 +1,25 @@
+name: Dan Focused TDD
+
+on:
+  push:
+    branches:
+      - dan-irish-research-v1
+    paths:
+      - tests/test_dan_dynamic_swing.py
+      - scanner/core/multisession_replay.py
+      - scanner/strategies/dan_irish/rules.py
+      - .github/workflows/dan-focused-tdd.yml
+
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dan-irish-research-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: PYTHONPATH=. pytest -q tests/test_dan_dynamic_swing.py

@@ -18,7 +18,7 @@ from .config import (
     RETAINED_GAIN_GRID,
     TURNOVER_GRID,
 )
-from .intraday import generate_dan_intraday_signals
+from .intraday import generate_dan_intraday_signal_grid
 from .rules import default_dan_swing_rules
 from .swing import generate_dan_swing_signals
 
@@ -87,7 +87,7 @@ def generate_dan_signal_set(
             skips.append({"symbol": symbol, "date": day, "reason": "MISSING_DAN_DAY0_MINUTE_CACHE"})
             continue
 
-        intraday = generate_dan_intraday_signals(day0_bars, context, cfg)
+        intraday = generate_dan_intraday_signal_grid(day0_bars, context, cfg)
         if not intraday.empty:
             intraday = intraday.copy()
             intraday["_cache_namespace"] = "multistrategy_alpaca"

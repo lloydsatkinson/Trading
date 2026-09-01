@@ -64,9 +64,20 @@ def _validate_final_input(root: Path) -> dict:
     if not manifest_path.exists():
         raise FileNotFoundError(f"missing {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
-    sessions = [str(v)[:10] for v in manifest.get("session_dates", [])]
-    if len(sessions) != 12 or sessions[0] != "2026-08-12" or sessions[-1] != "2026-08-27":
-        raise RuntimeError(f"final holdout must be exactly 2026-08-12..2026-08-27 (12 sessions), got {sessions}")
+    session_dates = [str(v)[:10] for v in manifest.get("session_dates", [])]
+    if session_dates:
+        valid = len(session_dates) == 12 and session_dates[0] == "2026-08-12" and session_dates[-1] == "2026-08-27"
+    else:
+        valid = (
+            int(manifest.get("sessions") or 0) == 12
+            and str(manifest.get("start") or "")[:10] == "2026-08-12"
+            and str(manifest.get("end") or "")[:10] == "2026-08-27"
+        )
+    if not valid:
+        raise RuntimeError(
+            "final holdout must be exactly 2026-08-12..2026-08-27 (12 sessions); "
+            f"session_dates={session_dates} start={manifest.get('start')} end={manifest.get('end')} sessions={manifest.get('sessions')}"
+        )
     return manifest
 
 

@@ -6,7 +6,7 @@ import pandas as pd
 from scanner.multistrategy.config import MultiStrategyConfig
 from scanner.multistrategy.study import MultiStrategyStudy
 from scanner.strategies.dan_irish.config import DanConfig
-from scanner.strategies.dan_irish.research import mark_corporate_action_replays
+from scanner.strategies.dan_irish import research as dan_research
 from scanner.strategies.dan_irish.swing import generate_dan_swing_signals
 
 
@@ -154,7 +154,7 @@ def test_confirmed_split_marks_overlapping_swing_replay_ineligible():
         }
     ])
 
-    out = mark_corporate_action_replays(replays, actions)
+    out = dan_research.mark_corporate_action_replays(replays, actions)
     aaa = out[out["symbol"].eq("AAA")].iloc[0]
     bbb = out[out["symbol"].eq("BBB")].iloc[0]
     assert bool(aaa["corporate_action_flag"]) is True

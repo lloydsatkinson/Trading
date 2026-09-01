@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from math import isfinite
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
@@ -17,8 +18,15 @@ from scanner.core.features import (
 )
 from scanner.core.models import SignalRecord, market_cap_bucket, price_bucket
 from scanner.core.replay import apply_entry_slippage
-from .config import DanConfig
-from .features import retained_gain_ratio
+from .config import (
+    BREAKOUT_VOLUME_RATIO_GRID,
+    CONSOLIDATION_MINUTES_GRID,
+    DanConfig,
+)
+from .features import retained_gain_checkpoint_values, retained_gain_ratio
+
+
+DEFAULT_BREAKOUT_REFERENCES = ("BASE_HIGH", "HOD", "PM_HIGH")
 
 
 def _number(value: Any) -> float | None:
@@ -43,12 +51,35 @@ def _regular_session(bars: pd.DataFrame) -> pd.DataFrame:
     return x[(clock >= pd.Timestamp("09:30").time()) & (clock < pd.Timestamp("16:00").time())].reset_index(drop=True)
 
 
+def _breakout_level(
+    x: pd.DataFrame,
+    idx: int,
+    base_high: float,
+    context: dict[str, Any],
+    breakout_reference: str,
+) -> float | None:
+    reference = str(breakout_reference).upper()
+    if reference == "BASE_HIGH":
+        return float(base_high)
+    if reference == "PM_HIGH":
+        return _number(context.get("pm_high"))
+    if reference == "HOD":
+        # Completed bars only: the current confirmation bar cannot set the level it breaks.
+        prior = pd.to_numeric(x.iloc[:idx]["high"], errors="coerce").dropna()
+        return float(prior.max()) if not prior.empty else None
+    raise ValueError(f"Unsupported Dan breakout reference: {breakout_reference}")
+
+
 def generate_dan_intraday_signals(
     bars: pd.DataFrame,
     context: dict[str, Any],
     cfg: DanConfig | None = None,
+    breakout_reference: str = "BASE_HIGH",
 ) -> pd.DataFrame:
     cfg = cfg or DanConfig()
+    reference_type = str(breakout_reference).upper()
+    if reference_type not in DEFAULT_BREAKOUT_REFERENCES:
+        raise ValueError(f"Unsupported Dan breakout reference: {breakout_reference}")
     if bars.empty or context.get("dan_candidate") is False:
         return pd.DataFrame()
     prior_close = _number(context.get("prior_close"))
@@ -71,6 +102,13 @@ def generate_dan_intraday_signals(
     impulse_pct = impulse_high / prior_close - 1.0
     if impulse_high <= prior_close:
         return pd.DataFrame()
+
+    checkpoints = retained_gain_checkpoint_values(
+        x,
+        impulse_timestamp=x.loc[impulse_idx, "timestamp_et"],
+        impulse_start_price=prior_close,
+        impulse_high_price=impulse_high,
+    )
 
     first_confirmation = impulse_idx + int(cfg.min_consolidation_minutes) + 1
     for idx in range(first_confirmation, len(x)):
@@ -95,7 +133,8 @@ def generate_dan_intraday_signals(
         volume_ratio = _number(row.get("volume_ratio"))
         if volume_ratio is None or volume_ratio < cfg.min_breakout_volume_ratio:
             continue
-        if float(row["close"]) <= base_high:
+        level = _breakout_level(x, idx, base_high, context, reference_type)
+        if level is None or not np.isfinite(level) or float(row["close"]) <= float(level):
             continue
 
         entry = x.loc[next_idx]
@@ -103,8 +142,23 @@ def generate_dan_intraday_signals(
         cap = _number(context.get("market_cap"))
         float_shares = _number(context.get("float_shares"))
         setup_id = dan_intraday_setup_id(
-            int(cfg.min_consolidation_minutes), "BASE_HIGH", cfg.min_breakout_volume_ratio
+            int(cfg.min_consolidation_minutes), reference_type, cfg.min_breakout_volume_ratio
         )
+        setup_metadata = {
+            "setup_id": setup_id,
+            "impulse_pct": impulse_pct,
+            "impulse_high": impulse_high,
+            "base_low": base_low,
+            "base_high": base_high,
+            "retained_gain_ratio": retained,
+            "pullback_depth": pullback_depth,
+            "breakout_volume_ratio": volume_ratio,
+            "breakout_reference_type": reference_type,
+            "breakout_level": float(level),
+            "clv": float(row["clv"]),
+            "session_vwap": _number(row.get("session_vwap")),
+            **checkpoints,
+        }
         record = SignalRecord(
             strategy_id="DAN_IRISH",
             variant_id="DAN_INTRADAY_SECONDARY",
@@ -125,18 +179,7 @@ def generate_dan_intraday_signals(
             rvol_bucket=bucket_rvol(context.get("opening_rvol")),
             time_of_day_bucket=bucket_time_of_day(row["timestamp_et"]),
             catalyst_class=str(context.get("catalyst_class") or "UNKNOWN"),
-            setup_metadata={
-                "setup_id": setup_id,
-                "impulse_pct": impulse_pct,
-                "impulse_high": impulse_high,
-                "base_low": base_low,
-                "base_high": base_high,
-                "retained_gain_ratio": retained,
-                "pullback_depth": pullback_depth,
-                "breakout_volume_ratio": volume_ratio,
-                "clv": float(row["clv"]),
-                "session_vwap": _number(row.get("session_vwap")),
-            },
+            setup_metadata=setup_metadata,
         ).to_dict()
         record.update({
             "split": str(context.get("split") or "forward"),
@@ -150,12 +193,48 @@ def generate_dan_intraday_signals(
             "pullback_depth": pullback_depth,
             "consolidation_minutes": int(len(base)),
             "breakout_volume_ratio": volume_ratio,
-            "breakout_reference_type": "BASE_HIGH",
+            "breakout_reference_type": reference_type,
+            "breakout_level": float(level),
             "attribution": "DAN_DERIVED",
             "_replay_mode": "intraday",
             "pm_gap_pct": context.get("pm_gap_pct"),
             "pm_dollar_turnover": context.get("pm_dollar_turnover"),
             "opening_rvol": context.get("opening_rvol"),
+            **checkpoints,
         })
         return pd.DataFrame([record])
     return pd.DataFrame()
+
+
+def generate_dan_intraday_signal_grid(
+    bars: pd.DataFrame,
+    context: dict[str, Any],
+    cfg: DanConfig | None = None,
+    consolidation_minutes: Iterable[int] = CONSOLIDATION_MINUTES_GRID,
+    breakout_references: Iterable[str] = DEFAULT_BREAKOUT_REFERENCES,
+    volume_ratios: Iterable[float] = BREAKOUT_VOLUME_RATIO_GRID,
+) -> pd.DataFrame:
+    """Generate distinct entry-timing hypotheses without pooling setup identities."""
+    cfg = cfg or DanConfig()
+    frames: list[pd.DataFrame] = []
+    for minutes in consolidation_minutes:
+        for reference in breakout_references:
+            for ratio in volume_ratios:
+                combo = replace(
+                    cfg,
+                    min_consolidation_minutes=int(minutes),
+                    min_breakout_volume_ratio=float(ratio),
+                )
+                signal = generate_dan_intraday_signals(
+                    bars,
+                    context,
+                    combo,
+                    breakout_reference=str(reference),
+                )
+                if not signal.empty:
+                    frames.append(signal)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False).drop_duplicates(
+        subset=["symbol", "entry_timestamp", "setup_id"], keep="first"
+    ).reset_index(drop=True)

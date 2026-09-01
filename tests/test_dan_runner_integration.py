@@ -5,6 +5,7 @@ import pandas as pd
 
 import scripts.run_strategy_research as runner
 from scanner.core.multisession_replay import SwingReplayRule
+from scanner.strategies.dan_irish.intraday import generate_dan_intraday_signal_grid as _real_dan_intraday_grid
 
 
 def _bars(day, rows):
@@ -152,6 +153,19 @@ def _integration_rules(signal):
     ]
 
 
+def _integration_intraday_grid(bars, context, cfg=None):
+    # Exhaustive setup-grid correctness is covered elsewhere. The runner smoke
+    # test needs two distinct setup identities, not the full 54-combination matrix.
+    return _real_dan_intraday_grid(
+        bars,
+        context,
+        cfg,
+        consolidation_minutes=(10,),
+        breakout_references=("BASE_HIGH", "HOD"),
+        volume_ratios=(1.0,),
+    )
+
+
 def test_parse_strategies_supports_dan_and_all():
     assert runner._parse_strategies("dan") == ("dan",)
     assert "dan" in runner._parse_strategies("all")
@@ -170,6 +184,7 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
 
     monkeypatch.setattr(runner, "MultiStrategyStudy", _FakeDanStudy)
     monkeypatch.setattr("scanner.strategies.dan_irish.research.default_dan_swing_rules", _integration_rules)
+    monkeypatch.setattr("scanner.strategies.dan_irish.research.generate_dan_intraday_signal_grid", _integration_intraday_grid)
     monkeypatch.setattr("requests.sessions.Session.request", _blocked_http)
 
     result = runner.run_research(

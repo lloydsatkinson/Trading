@@ -20,6 +20,7 @@ from scanner.multistrategy.study import MultiStrategyStudy
 from scanner.portfolio.strategy_ranker import rank_strategies
 from scanner.serclick.marketcap import enrich_market_caps_from_history
 from scanner.serclick.study import SerClickStudy
+from scanner.strategies.dan_irish.corporate_actions import mark_corporate_action_replays
 from scanner.strategies.dan_irish.research import (
     add_retained_gain_bucket,
     build_dan_summaries,
@@ -443,6 +444,20 @@ def run_research(
                 _load_symbol_minute_bars,
             )
             if not swing_replays.empty:
+                audit_status = str(study_meta.get("corporate_action_audit_status") or "UNAVAILABLE").upper()
+                if audit_status == "OK":
+                    swing_replays = mark_corporate_action_replays(
+                        swing_replays,
+                        study_meta.get("corporate_actions", pd.DataFrame()),
+                    )
+                    swing_replays["corporate_action_audit_unavailable"] = False
+                else:
+                    swing_replays = swing_replays.copy()
+                    swing_replays["corporate_action_flag"] = False
+                    swing_replays["corporate_action_type"] = None
+                    swing_replays["corporate_action_date"] = None
+                    swing_replays["corporate_action_audit_unavailable"] = True
+                    swing_replays["selection_eligible_replay"] = False
                 replay_frames.append(swing_replays)
             if not swing_skips.empty:
                 skip_frames.append(swing_skips)
@@ -485,7 +500,12 @@ def run_research(
     meta = {
         "run_id": run_id,
         "feed": feed.upper(),
-        "market_data_adjustment": "raw",
+        "market_data_adjustment": (
+            str(study_meta.get("bar_adjustment") or "raw") if study_meta is not None else "raw"
+        ),
+        "corporate_action_audit_status": (
+            str(study_meta.get("corporate_action_audit_status") or "NOT_RUN") if study_meta is not None else "NOT_RUN"
+        ),
         "requested_sessions": int(sessions),
         "strategies": sorted(selected),
         "start_date": min(start_dates) if start_dates else None,

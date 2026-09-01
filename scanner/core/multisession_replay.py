@@ -362,7 +362,7 @@ def _simulate_prepared_multisession_trade(
     mfe, mae, trading_peak, calendar_peak = _excursions_and_peak(path, entry, direction, entry_date)
     r_mult = ret / risk_pct if risk_pct else np.nan
     return SwingReplayResult(
-        "TIME", terminal["timestamp_et"], exit_price, len(path),
+        "TIME", terminal["timestamp_et"], exit_price, ret, len(path),
         mfe_pct=mfe, mae_pct=mae, r_multiple=r_mult,
         trading_days_to_peak=trading_peak, calendar_days_to_peak=calendar_peak,
     )

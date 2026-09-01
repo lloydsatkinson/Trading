@@ -37,7 +37,14 @@ def default_dan_swing_rules(signal: Mapping[str, Any]) -> list[SwingReplayRule]:
     """
     rules: list[SwingReplayRule] = []
     entry = _finite_positive(signal.get("entry_price_slipped"))
-    structural_stop = _long_stop(signal.get("stop_reference"), entry)
+    # Preserve the historical rule-builder contract for callers that only provide
+    # a structural stop. Production signals do carry an entry, in which case the
+    # long-side sanity check still rejects a stop at/above the actual entry.
+    structural_stop = (
+        _finite_positive(signal.get("stop_reference"))
+        if entry is None
+        else _long_stop(signal.get("stop_reference"), entry)
+    )
     prior_day_low = _long_stop(signal.get("prior_day_low"), entry)
     day0_support = _long_stop(signal.get("day0_support"), entry)
     anchored_vwap = _long_stop(signal.get("anchored_vwap_at_entry"), entry)

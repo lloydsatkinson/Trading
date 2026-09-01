@@ -219,6 +219,8 @@ class MultiStrategyStudy:
         self.paths = MultiStrategyPaths.build(root)
         self.run_id = f"multistrategy_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         self._api = None
+        self._corporate_action_audit_status = "NOT_REQUESTED"
+        self._corporate_action_audit_error: str | None = None
 
     @property
     def api(self):
@@ -392,6 +394,52 @@ class MultiStrategyStudy:
         out.to_csv(cache, index=False, compression="gzip")
         return out
 
+    def _corporate_actions(self, symbols: list[str], sessions: list[date]) -> pd.DataFrame:
+        columns = ["symbol", "action_type", "action_date"]
+        symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+        if not symbols or not sessions:
+            self._corporate_action_audit_status = "NOT_NEEDED"
+            return pd.DataFrame(columns=columns)
+
+        digest = hashlib.sha1("\n".join(symbols).encode("utf-8")).hexdigest()[:12]
+        cache = self.paths.cache / "corporate_actions" / f"{sessions[0]}_{sessions[-1]}_{digest}.csv"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        if cache.exists():
+            out = pd.read_csv(cache)
+            if "action_date" in out.columns:
+                out["action_date"] = pd.to_datetime(out["action_date"], errors="coerce").dt.date
+            self._corporate_action_audit_status = "OK_CACHE"
+            return out
+
+        try:
+            parts = [
+                self.api.corporate_actions(
+                    batch,
+                    start=str(sessions[0]),
+                    end=str(sessions[-1]),
+                    types=("reverse_split", "forward_split", "unit_split"),
+                    limit=1_000,
+                )
+                for batch in _chunks(symbols, self.cfg.symbol_batch_size)
+            ]
+        except Exception as exc:
+            self._corporate_action_audit_status = "UNAVAILABLE"
+            self._corporate_action_audit_error = f"{type(exc).__name__}: {exc}"
+            return pd.DataFrame(columns=columns)
+
+        frames = [part for part in parts if part is not None and not part.empty]
+        out = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame(columns=columns)
+        if not out.empty:
+            if "symbol" in out.columns:
+                out["symbol"] = out["symbol"].astype(str).str.upper()
+            if "action_date" in out.columns:
+                out["action_date"] = pd.to_datetime(out["action_date"], errors="coerce").dt.date
+            out = out.drop_duplicates().sort_values(["symbol", "action_date", "action_type"]).reset_index(drop=True)
+        out.to_csv(cache, index=False)
+        self._corporate_action_audit_status = "OK"
+        self._corporate_action_audit_error = None
+        return out
+
     def run(self, include_dan_candidates: bool = False) -> dict[str, Any]:
         sessions = self._completed_sessions()
         split_map = chronological_split(sessions, self.cfg.development_sessions, self.cfg.validation_sessions, self.cfg.test_sessions)
@@ -478,14 +526,21 @@ class MultiStrategyStudy:
             "candidate_contexts": context_df,
             "minute_files": minute_files,
             "output_dir": str(output_dir),
+            "bar_adjustment": self.cfg.bar_adjustment,
         }
         if include_dan_candidates:
             dan_df = pd.DataFrame(dan_contexts)
             dan_df.to_csv(output_dir / "dan_candidate_contexts.csv", index=False)
+            dan_symbols = sorted(set(dan_df["symbol"].astype(str))) if not dan_df.empty and "symbol" in dan_df.columns else []
+            corporate_actions = self._corporate_actions(dan_symbols, sessions)
+            corporate_actions.to_csv(output_dir / "corporate_actions.csv", index=False)
             result.update({
                 "dan_candidate_contexts": dan_df,
                 "daily_bars": daily,
                 "split_end_dates": _split_end_dates(split_map),
                 "session_splits": {str(day): str(split) for day, split in split_map.items()},
+                "corporate_actions": corporate_actions,
+                "corporate_action_audit_status": self._corporate_action_audit_status,
+                "corporate_action_audit_error": self._corporate_action_audit_error,
             })
         return result

@@ -148,3 +148,33 @@ jobs:
           name: parameter-sweep-results
           path: output/parameter_sweep/
           retention-days: 14
+
+  target-sweep-research:
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[target-sweep-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: intraday-small-cap-results
+          path: input/intraday
+          github-token: ${{ github.token }}
+          repository: lloydsatkinson/Trading
+          run-id: 33214478726
+      - name: Replay structural-R target ladder from one SIP data pass
+        run: python -m scripts.run_target_sweep --input input/intraday --output output/target_sweep --target-sweep 0.5,1,1.5,2,2.5,3,4,5 --slip-bps 20 --feed sip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: target-sweep-results
+          path: output/target_sweep/
+          retention-days: 14

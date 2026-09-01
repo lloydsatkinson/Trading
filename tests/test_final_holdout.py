@@ -1,6 +1,8 @@
+import json
+
 import pandas as pd
 
-from scripts.run_final_holdout import FINAL_CONFIGS, _simulate, final_target
+from scripts.run_final_holdout import FINAL_CONFIGS, _simulate, _validate_final_input, final_target
 
 
 def test_final_configs_are_frozen_three_strategy_rules():
@@ -41,3 +43,19 @@ def test_stress_slippage_reprices_entry_from_baseline_20bps():
     # includes 20bp slippage (10.00 * 1.002 = 10.02). A true 40bp stress entry
     # must therefore be 10.04, not the inherited 10.02.
     assert result["entry"] == 10.04
+
+
+def test_final_manifest_accepts_prepare_format_without_session_dates(tmp_path):
+    history = tmp_path / "history"
+    history.mkdir()
+    manifest = {
+        "feed": "sip",
+        "sessions": 12,
+        "start": "2026-08-12",
+        "end": "2026-08-27",
+    }
+    (history / "manifest.json").write_text(json.dumps(manifest))
+
+    got = _validate_final_input(tmp_path)
+
+    assert got == manifest

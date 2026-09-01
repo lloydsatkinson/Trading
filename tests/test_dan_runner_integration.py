@@ -85,6 +85,7 @@ def _dan_contexts():
         "split": "validation",
         "feed": "SIP",
         "prior_close": 4.00,
+        "pm_high": 5.00,
         "dan_candidate": True,
         "price_bucket": "2_5",
         "pm_gap_pct": 0.20,
@@ -130,9 +131,8 @@ def _blocked_http(*args, **kwargs):
 
 
 def _integration_rules(signal):
-    # The complete 455-rule Dan grid is asserted independently in
-    # test_dan_reporting.py. The integration smoke only needs representative
-    # 1- and 2-session rules to prove the runner uses real swing replay/censoring.
+    # The complete Dan rule grid is asserted independently. Integration only
+    # needs representative 1- and 2-session rules to prove real replay/censoring.
     return [
         SwingReplayRule(stop_pct=0.08, target_r_multiple=2.0, max_hold_sessions=1),
         SwingReplayRule(stop_pct=0.08, target_r_multiple=2.0, max_hold_sessions=2),
@@ -171,6 +171,9 @@ def test_api_free_dan_runner_executes_intraday_and_swing_paths(tmp_path, monkeyp
     assert not result.signals.empty
     assert set(result.signals["strategy_id"]) == {"DAN_IRISH"}
     assert {"intraday", "swing"}.issubset(set(result.signals["_replay_mode"]))
+    intraday = result.signals[result.signals["_replay_mode"].eq("intraday")]
+    assert intraday["setup_id"].nunique() >= 2
+    assert {"retained_gain_10m", "retained_gain_20m", "retained_gain_30m"}.issubset(intraday.columns)
     assert not result.replays.empty
     assert not result.price_bucket_summary.empty
     assert not result.swing_hold_summary.empty

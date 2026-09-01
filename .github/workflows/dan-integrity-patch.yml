@@ -1,0 +1,129 @@
+name: Dan Integrity Patch
+
+on:
+  push:
+    branches:
+      - dan-irish-research-v1
+    paths:
+      - .github/workflows/dan-integrity-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dan-irish-research-v1
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply conservative Dan replay integrity fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replay = Path('scanner/core/multisession_replay.py')
+          text = replay.read_text(encoding='utf-8')
+          old = '''    trading_days_to_peak: float = np.nan
+    calendar_days_to_peak: float = np.nan
+    boundary_censored: bool = False
+'''
+          new = '''    trading_days_to_peak: float = np.nan
+    calendar_days_to_peak: float = np.nan
+    gap_through_stop: bool = False
+    boundary_censored: bool = False
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    entry_date,
+    risk_pct: float | None,
+) -> SwingReplayResult:
+'''
+          new = '''    entry_date,
+    risk_pct: float | None,
+    gap_through_stop: bool = False,
+) -> SwingReplayResult:
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        trading_peak,
+        calendar_peak,
+    )
+'''
+          new = '''        trading_peak,
+        calendar_peak,
+        gap_through_stop=bool(gap_through_stop),
+    )
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''                reason = stop_reason if stop_reason != "STOP" else "GAP_STOP"
+                return _result_at(reason, ts, open_, seen_count, path, entry, direction, entry_date, risk_pct)
+'''
+          new = '''                reason = stop_reason if stop_reason != "STOP" else "GAP_STOP"
+                return _result_at(
+                    reason, ts, open_, seen_count, path, entry, direction, entry_date, risk_pct,
+                    gap_through_stop=True,
+                )
+'''
+          assert text.count(old) == 2
+          text = text.replace(old, new)
+          replay.write_text(text, encoding='utf-8')
+
+          research = Path('scanner/strategies/dan_irish/research.py')
+          text = research.read_text(encoding='utf-8')
+          old = '''        minute_frames: list[pd.DataFrame] = []
+        for day in relevant_dates:
+            bars = minute_loader(root, "multistrategy_alpaca", str(day), feed, symbol)
+            if not bars.empty:
+                minute_frames.append(bars)
+        path = pd.concat(minute_frames, ignore_index=True, sort=False) if minute_frames else pd.DataFrame()
+'''
+          new = '''        minute_frames: list[pd.DataFrame] = []
+        missing_dates: list[date] = []
+        for day in relevant_dates:
+            bars = minute_loader(root, "multistrategy_alpaca", str(day), feed, symbol)
+            if bars.empty:
+                missing_dates.append(day)
+            else:
+                minute_frames.append(bars)
+        if missing_dates:
+            for missing_day in missing_dates:
+                skips.append({
+                    "symbol": symbol,
+                    "date": signal.get("date"),
+                    "reason": "MISSING_DAN_SWING_SESSION_CACHE",
+                    "missing_session": str(missing_day),
+                })
+            continue
+        path = pd.concat(minute_frames, ignore_index=True, sort=False) if minute_frames else pd.DataFrame()
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        gap = group["exit_reason"].astype(str).eq("GAP_STOP") if "exit_reason" in group.columns else pd.Series(False, index=group.index)
+'''
+          new = '''        if "gap_through_stop" in group.columns:
+            gap = group["gap_through_stop"].fillna(False).astype(bool)
+        elif "exit_reason" in group.columns:
+            gap = group["exit_reason"].astype(str).eq("GAP_STOP")
+        else:
+            gap = pd.Series(False, index=group.index)
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          research.write_text(text, encoding='utf-8')
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scanner/core/multisession_replay.py scanner/strategies/dan_irish/research.py
+          git commit -m "fix: preserve Dan gap and session integrity"
+          git push origin HEAD:dan-irish-research-v1

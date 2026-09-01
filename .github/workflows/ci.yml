@@ -178,3 +178,37 @@ jobs:
           name: target-sweep-results
           path: output/target_sweep/
           retention-days: 14
+
+  final-holdout-research:
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[final-holdout-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Build untouched 12-session raw holdout
+        run: python -m scripts.run_intraday_tournament --days 12 --end-date 2026-08-27 --feed sip --output output/final_raw --slip-bps 20
+      - name: Score frozen rules at normal and 2x slippage
+        run: python -m scripts.run_final_holdout --input output/final_raw --output output/final_holdout --feed sip --slip-bps 20
+      - name: Remove bulky final minute cache
+        if: always()
+        run: rm -f output/final_raw/history/minute_candidates.csv.gz || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: final-holdout-results
+          path: |
+            output/final_holdout/
+            output/final_raw/trades.csv
+            output/final_raw/leaderboard.csv
+            output/final_raw/summary.md
+            output/final_raw/history/manifest.json
+            output/final_raw/history/coarse_candidates.csv
+          retention-days: 30

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from scripts.run_fixed_stop_replay import select_frozen_candidates
+from scripts.run_fixed_stop_replay import parameter_grid, select_frozen_candidates
 
 
 def test_frozen_candidates_include_extreme_pop_and_drop_only():
@@ -37,3 +37,12 @@ def test_frozen_candidates_include_extreme_pop_and_drop_only():
         "POP_AND_DROP_EXTREME_75_PLUS",
     }
     assert set(out.loc[out["candidate"].eq("POP_AND_DROP_EXTREME_75_PLUS"), "ticker"]) == {"POP"}
+
+
+def test_parameter_grid_crosses_stops_and_holds_without_duplicates():
+    assert parameter_grid([0.10, 0.15, 0.10], [15, 30, 15]) == [
+        (0.10, 15),
+        (0.10, 30),
+        (0.15, 15),
+        (0.15, 30),
+    ]

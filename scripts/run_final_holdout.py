@@ -13,6 +13,8 @@ from trading_lab.alpaca_intraday import Alpaca
 from trading_lab.fixed_stop import simulate_fixed_stop
 
 
+BASELINE_ENTRY_SLIP_BPS = 20.0
+
 FINAL_CONFIGS = {
     "SSR_FLUSH_RECLAIM_FINAL": {
         "candidate": "SSR_FLUSH_RECLAIM_RISK_3_5",
@@ -45,6 +47,18 @@ def final_target(side: str, entry: float, original_stop: float, target_r: float)
     return float(entry + target_r * risk if side == "LONG" else entry - target_r * risk)
 
 
+def _entry_with_slippage(side: str, stored_entry: float, desired_slip_bps: float) -> float:
+    side = side.upper()
+    if side not in {"LONG", "SHORT"}:
+        raise ValueError("side must be LONG or SHORT")
+    if desired_slip_bps < 0:
+        raise ValueError("desired slippage must be non-negative")
+    baseline_q = BASELINE_ENTRY_SLIP_BPS / 10000.0
+    desired_q = desired_slip_bps / 10000.0
+    raw_entry = stored_entry / (1.0 + baseline_q if side == "LONG" else 1.0 - baseline_q)
+    return float(raw_entry * (1.0 + desired_q if side == "LONG" else 1.0 - desired_q))
+
+
 def _validate_final_input(root: Path) -> dict:
     manifest_path = root / "history" / "manifest.json"
     if not manifest_path.exists():
@@ -71,17 +85,19 @@ def _configured(candidates: pd.DataFrame) -> pd.DataFrame:
 
 
 def _simulate(row, bars: pd.DataFrame, slip_bps: float) -> dict:
-    target = final_target(str(row.side), float(row.entry), float(row.stop), float(row.fixed_target_r))
+    side = str(row.side).upper()
+    entry = _entry_with_slippage(side, float(row.entry), slip_bps)
+    target = final_target(side, entry, float(row.stop), float(row.fixed_target_r))
     r = simulate_fixed_stop(
         bars,
-        side=str(row.side),
-        entry=float(row.entry),
+        side=side,
+        entry=entry,
         target=target,
         stop_pct=float(row.fixed_stop_pct),
         slip_bps=slip_bps,
         hold_minutes=int(row.fixed_hold_minutes),
     )
-    risk_pct = ((float(row.entry) - float(row.stop)) / float(row.entry)) if row.side == "LONG" else ((float(row.stop) - float(row.entry)) / float(row.entry))
+    risk_pct = ((entry - float(row.stop)) / entry) if side == "LONG" else ((float(row.stop) - entry) / entry)
     realized_r = float(r["return_pct"]) / risk_pct
     return {
         "config": row.config,
@@ -91,7 +107,7 @@ def _simulate(row, bars: pd.DataFrame, slip_bps: float) -> dict:
         "ticker": row.ticker,
         "session_date": row.session_date,
         "entry_ts": row.entry_ts.isoformat(),
-        "entry": float(row.entry),
+        "entry": float(entry),
         "original_stop": float(row.stop),
         "structural_risk_pct": float(risk_pct),
         "fixed_stop_pct": float(row.fixed_stop_pct),
@@ -225,6 +241,7 @@ def main() -> None:
         "normal_and_stress_expected_replays": int(len(configured) * 2),
         "replayed": int(len(replayed)),
         "missing": int(len(missing)),
+        "baseline_entry_slip_bps": BASELINE_ENTRY_SLIP_BPS,
         "normal_slip_bps": a.slip_bps,
         "stress_slip_bps": a.slip_bps * 2,
         "holdout_policy": "one-shot scoring of rules frozen before opening 2026-08-12 through 2026-08-27; no optimization performed on this block",

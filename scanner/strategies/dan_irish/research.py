@@ -140,7 +140,11 @@ def replay_dan_swing_signals(
     for signal in signals.to_dict("records"):
         symbol = str(signal["symbol"])
         entry_date = pd.Timestamp(signal["entry_timestamp"]).date()
-        relevant_dates = [d for d in daily_dates_by_symbol.get(symbol, []) if d >= entry_date]
+        probe_rules = default_dan_swing_rules(signal)
+        max_hold_sessions = max((int(rule.max_hold_sessions) for rule in probe_rules), default=0)
+        relevant_dates = [d for d in daily_dates_by_symbol.get(symbol, []) if d >= entry_date][
+            : max_hold_sessions + 1
+        ]
         minute_frames: list[pd.DataFrame] = []
         for day in relevant_dates:
             bars = minute_loader(root, "multistrategy_alpaca", str(day), feed, symbol)
@@ -275,6 +279,7 @@ def summarize_dan_threshold_grid(replays: pd.DataFrame) -> pd.DataFrame:
                             "max_drawdown": max_drawdown(returns),
                         })
     return pd.DataFrame(rows)
+
 
 def retained_gain_bucket(value) -> str:
     try:

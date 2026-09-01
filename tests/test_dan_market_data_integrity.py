@@ -19,6 +19,25 @@ class _FakeBarsApi:
         return pd.DataFrame()
 
 
+class _FakeCorporateApi:
+    def __init__(self):
+        self.calls = []
+
+    def corporate_actions(self, symbols, start, end, types, limit=1000):
+        self.calls.append({
+            "symbols": list(symbols),
+            "start": str(start),
+            "end": str(end),
+            "types": tuple(types),
+            "limit": int(limit),
+        })
+        return pd.DataFrame([{
+            "symbol": "AAA",
+            "action_type": "reverse_split",
+            "action_date": date(2026, 8, 31),
+        }])
+
+
 def test_multistrategy_bar_fetches_pass_explicit_raw_adjustment(tmp_path):
     cfg = MultiStrategyConfig(bar_adjustment="raw")
     study = MultiStrategyStudy(root=tmp_path, feed="sip", sessions=1, cfg=cfg)
@@ -33,6 +52,21 @@ def test_multistrategy_bar_fetches_pass_explicit_raw_adjustment(tmp_path):
 
     assert fake.adjustments
     assert set(fake.adjustments) == {"raw"}
+
+
+def test_dan_study_collects_confirmed_split_actions_for_candidates(tmp_path):
+    study = MultiStrategyStudy(root=tmp_path, feed="sip", sessions=2)
+    fake = _FakeCorporateApi()
+    study._api = fake
+    sessions = [date(2026, 8, 28), date(2026, 8, 31)]
+
+    out = study._corporate_actions(["AAA", "BBB"], sessions)
+
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["symbols"] == ["AAA", "BBB"]
+    assert fake.calls[0]["types"] == ("reverse_split", "forward_split", "unit_split")
+    assert set(out["action_type"]) == {"reverse_split"}
+    assert set(out["symbol"]) == {"AAA"}
 
 
 def _daily_fixture():

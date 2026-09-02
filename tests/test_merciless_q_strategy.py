@@ -49,11 +49,21 @@ def first_pullback_fixture():
     ])
 
 
+def no_impulse_fixture():
+    return bars([
+        ("2026-08-28 09:30", 4.20, 4.30, 4.18, 4.26, 100, 4.24),
+        ("2026-08-28 09:31", 4.26, 4.45, 4.24, 4.40, 220, 4.35),
+        ("2026-08-28 09:32", 4.39, 4.50, 4.32, 4.38, 160, 4.40),
+        ("2026-08-28 09:33", 4.38, 4.44, 4.31, 4.35, 120, 4.37),
+        ("2026-08-28 09:34", 4.35, 4.43, 4.33, 4.40, 100, 4.38),
+        ("2026-08-28 09:35", 4.40, 4.55, 4.39, 4.52, 260, 4.47),
+        ("2026-08-28 09:36", 4.53, 4.62, 4.50, 4.58, 180, 4.56),
+    ])
+
+
 def test_merciless_requires_minimum_impulse():
-    fixture = first_pullback_fixture().copy()
-    fixture.loc[1, ["open", "high", "low", "close", "vwap"]] = [4.45, 4.55, 4.44, 4.52, 4.50]
     out = generate_merciless_signals(
-        fixture,
+        no_impulse_fixture(),
         context(),
         MercilessConfig(min_impulse_pct=0.20),
     )

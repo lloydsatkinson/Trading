@@ -37,7 +37,7 @@ class FeatureEngine:
         gap_pct = latest_bar.close / prior_close - 1.0 if prior_close and prior_close > 0 else None
         rvol = _number(context.get("opening_rvol"))
 
-        prior_volumes = [float(bar.volume) for bar in list(state._bars)[:-1]][-5:]
+        prior_volumes = [float(value) for value in bars["volume"].iloc[:-1].tail(5).tolist()]
         volume_acceleration = None
         if len(prior_volumes) >= 2:
             baseline = median(prior_volumes)

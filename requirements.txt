@@ -4,3 +4,5 @@ requests>=2.31
 python-dotenv>=1.0
 tabulate>=0.9
 pytest>=8.0
+websocket-client>=1.8,<2
+streamlit>=1.40,<2

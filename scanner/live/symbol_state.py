@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections import deque
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from .models import MarketBar
+
+ET = ZoneInfo("America/New_York")
 
 
 class SymbolState:
@@ -20,6 +23,9 @@ class SymbolState:
             raise LookupError("symbol state has no bars")
         return self._bars[-1]
 
+    def has_timestamp(self, timestamp) -> bool:
+        return any(bar.timestamp == timestamp for bar in self._bars)
+
     def append_bar(self, bar: MarketBar) -> None:
         if bar.symbol.upper() != self.symbol:
             raise ValueError("bar symbol does not match state symbol")
@@ -30,19 +36,21 @@ class SymbolState:
         self._bars.append(bar)
 
     def bars_frame(self) -> pd.DataFrame:
-        rows = [
-            {
-                "symbol": bar.symbol.upper(),
-                "timestamp_et": bar.timestamp,
-                "session_date": bar.timestamp.date(),
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-            }
-            for bar in self._bars
-        ]
+        rows = []
+        for bar in self._bars:
+            timestamp_et = bar.timestamp.astimezone(ET)
+            rows.append(
+                {
+                    "symbol": bar.symbol.upper(),
+                    "timestamp_et": timestamp_et,
+                    "session_date": timestamp_et.date(),
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                }
+            )
         if rows:
             return pd.DataFrame(rows)
         return pd.DataFrame(

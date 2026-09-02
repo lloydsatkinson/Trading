@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 import scripts.run_strategy_research as runner
+from scanner.core.replay import ReplayRule
 
 
 def _minute_bars() -> pd.DataFrame:
@@ -96,12 +97,23 @@ def _blocked_http(*args, **kwargs):
     raise AssertionError("API-free Merciless smoke test attempted an HTTP request")
 
 
+def _single_structural_rule(signal, serclick=False):
+    return [
+        ReplayRule(
+            stop_price=float(signal["stop_reference"]),
+            target_r_multiple=1.0,
+            max_hold_minutes=5,
+        )
+    ]
+
+
 def test_api_free_runner_executes_merciless_and_writes_edge_artifacts(tmp_path, monkeypatch):
     cache = tmp_path / "data" / "cache" / "multistrategy_alpaca" / "minute"
     cache.mkdir(parents=True)
     _minute_bars().to_csv(cache / "2026-08-28_sip.csv.gz", index=False, compression="gzip")
 
     monkeypatch.setattr(runner, "MultiStrategyStudy", _FakeStudy)
+    monkeypatch.setattr(runner, "default_rules_for_signal", _single_structural_rule)
     monkeypatch.setattr("requests.sessions.Session.request", _blocked_http)
 
     result = runner.run_research(

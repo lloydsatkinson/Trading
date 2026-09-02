@@ -56,7 +56,7 @@ def subscription(**kwargs) -> str:
 
 
 def creds() -> AlpacaCredentials:
-    return AlpacaCredentials(key="k", secret="s")
+    return AlpacaCredentials(key="SUPERKEY123", secret="SUPERSECRET456")
 
 
 def test_one_socket_auth_then_subscribe():
@@ -75,8 +75,17 @@ def test_one_socket_auth_then_subscribe():
     assert factory.calls == 1
     assert factory.urls == ["wss://stream.data.alpaca.markets/v2/sip"]
     assert factory.socket is not None
-    assert factory.socket.sent[0] == {"action": "auth", "key": "k", "secret": "s"}
-    assert factory.socket.sent[1] == {"action": "subscribe", "bars": ["*"], "statuses": ["*"], "lulds": ["*"]}
+    assert factory.socket.sent[0] == {
+        "action": "auth",
+        "key": "SUPERKEY123",
+        "secret": "SUPERSECRET456",
+    }
+    assert factory.socket.sent[1] == {
+        "action": "subscribe",
+        "bars": ["*"],
+        "statuses": ["*"],
+        "lulds": ["*"],
+    }
 
 
 def test_quotes_are_subscribed_by_delta_only():
@@ -86,21 +95,19 @@ def test_quotes_are_subscribed_by_delta_only():
             control("authenticated"),
             subscription(bars=["*"], statuses=["*"], lulds=["*"]),
             subscription(bars=["*"], statuses=["*"], lulds=["*"], quotes=["ABC", "XYZ"]),
+            subscription(bars=["*"], statuses=["*"], lulds=["*"], quotes=["ABC"]),
             subscription(bars=["*"], statuses=["*"], lulds=["*"], quotes=["ABC", "DEF"]),
         ]
     )
     stream = AlpacaSIPStream(creds(), ws_factory=factory)
-    stream.connect(); stream.subscribe_initial()
+    stream.connect()
+    stream.subscribe_initial()
 
     stream.set_quote_symbols({"ABC", "XYZ"})
     stream.set_quote_symbols({"ABC", "DEF"})
 
-    sent = factory.socket.sent
-    assert sent[-2] == {"action": "subscribe", "quotes": ["ABC", "XYZ"]}
-    assert sent[-1] == {"action": "unsubscribe", "quotes": ["XYZ"]}
-    assert sent[-0 if False else -1] != {"action": "subscribe", "quotes": ["DEF"]}
-    # unsubscribe and subscribe are two messages; verify the final three transport deltas exactly.
-    assert sent[-3:] == [
+    assert factory.socket is not None
+    assert factory.socket.sent[-3:] == [
         {"action": "subscribe", "quotes": ["ABC", "XYZ"]},
         {"action": "unsubscribe", "quotes": ["XYZ"]},
         {"action": "subscribe", "quotes": ["DEF"]},
@@ -120,12 +127,14 @@ def test_auth_error_is_secret_free():
     with pytest.raises(AlpacaStreamError) as exc:
         stream.connect()
     text = str(exc.value)
-    assert "k" not in text
-    assert "secret" not in text.lower()
+    assert "SUPERKEY123" not in text
+    assert "SUPERSECRET456" not in text
 
 
 def test_recv_events_decodes_market_data():
-    market = json.dumps([{"T": "b", "S": "ABC", "o": 2.0, "h": 2.2, "l": 1.9, "c": 2.1, "v": 1000, "t": "2026-09-02T14:35:00Z"}])
+    market = json.dumps(
+        [{"T": "b", "S": "ABC", "o": 2.0, "h": 2.2, "l": 1.9, "c": 2.1, "v": 1000, "t": "2026-09-02T14:35:00Z"}]
+    )
     factory = FakeFactory([control("connected"), control("authenticated"), market])
     stream = AlpacaSIPStream(creds(), ws_factory=factory)
     stream.connect()
@@ -138,5 +147,7 @@ def test_recv_events_decodes_market_data():
 def test_close_closes_the_single_socket():
     factory = FakeFactory([control("connected"), control("authenticated")])
     stream = AlpacaSIPStream(creds(), ws_factory=factory)
-    stream.connect(); stream.close()
+    stream.connect()
+    stream.close()
+    assert factory.socket is not None
     assert factory.socket.closed is True

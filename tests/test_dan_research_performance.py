@@ -3,6 +3,7 @@ from datetime import date
 import pandas as pd
 
 import scanner.strategies.dan_irish.research as research
+import scanner.strategies.dan_irish.swing as swing_module
 from scanner.strategies.dan_irish.config import DanConfig
 
 
@@ -85,3 +86,60 @@ def test_bounded_symbol_loader_reads_each_day_once_and_returns_isolated_copies(t
     loader(tmp_path, "ns", "2026-08-30", "sip", "AAA")
     loader(tmp_path, "ns", "2026-08-28", "sip", "AAA")
     assert len(calls) == 4
+
+
+def test_signal_generation_passes_only_symbol_daily_history_to_swing(monkeypatch, tmp_path):
+    contexts = pd.DataFrame([
+        {"symbol": "AAA", "date": "2026-08-28", "prior_close": 4.0, "dan_candidate": True},
+        {"symbol": "BBB", "date": "2026-08-28", "prior_close": 4.0, "dan_candidate": True},
+    ])
+    seen = []
+
+    monkeypatch.setattr(research, "ensure_dan_followup_caches", lambda *args, **kwargs: None)
+    monkeypatch.setattr(research, "generate_dan_intraday_signal_grid", lambda *args, **kwargs: pd.DataFrame())
+
+    def fake_swing(context, daily_bars, minute_loader, cfg, session_splits=None):
+        seen.append((str(context["symbol"]), set(daily_bars["symbol"].astype(str))))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(research, "generate_dan_swing_signals", fake_swing)
+
+    def minute_loader(root, namespace, day, feed, symbol):
+        return pd.DataFrame([{
+            "symbol": symbol,
+            "timestamp": pd.Timestamp(f"{day} 09:30", tz="America/New_York").tz_convert("UTC"),
+            "open": 5.0,
+            "high": 5.1,
+            "low": 4.9,
+            "close": 5.0,
+            "volume": 100,
+            "vwap": 5.0,
+        }])
+
+    research.generate_dan_signal_set(
+        tmp_path,
+        "sip",
+        _Study(),
+        {
+            "dan_candidate_contexts": contexts,
+            "daily_bars": _daily_fixture(),
+            "session_splits": {},
+        },
+        minute_loader,
+    )
+
+    assert seen == [("AAA", {"AAA"}), ("BBB", {"BBB"})]
+
+
+def test_swing_daily_frame_reuses_prepared_symbol_frame(monkeypatch):
+    prepared = research.prepare_intraday_bars(_daily_fixture())
+    prepared = prepared[prepared["symbol"].astype(str).eq("AAA")].copy()
+
+    def should_not_run(frame):
+        raise AssertionError("already prepared daily bars should not be normalised again")
+
+    monkeypatch.setattr(swing_module, "prepare_intraday_bars", should_not_run)
+    out = swing_module._daily_frame(prepared, "AAA")
+
+    assert not out.empty
+    assert set(out["symbol"].astype(str)) == {"AAA"}

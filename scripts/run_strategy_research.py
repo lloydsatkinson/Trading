@@ -20,7 +20,12 @@ from scanner.multistrategy.study import MultiStrategyStudy
 from scanner.portfolio.strategy_ranker import rank_strategies
 from scanner.serclick.marketcap import enrich_market_caps_from_history
 from scanner.serclick.study import SerClickStudy
-from scanner.strategies.merciless_q.reporting import friction_break_even, summarize_sequence_edge
+from scanner.strategies.merciless_q.reporting import (
+    friction_break_even,
+    friction_threshold_summary,
+    sequence_bucket_summary,
+    summarize_sequence_edge,
+)
 from scanner.strategies.merciless_q.strategy import generate_merciless_signals
 from scanner.strategies.orb_stocks_in_play.strategy import generate_orb_signals
 from scanner.strategies.serclick_leo.strategy import adapt_serclick_ignitions
@@ -45,6 +50,8 @@ class ResearchResult:
     skips: pd.DataFrame
     sequence_edge: pd.DataFrame = field(default_factory=pd.DataFrame)
     friction_break_even: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sequence_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    friction_thresholds: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def read_csv(path: str | Path) -> pd.DataFrame:
@@ -284,7 +291,16 @@ def _best_holds(leaderboard: pd.DataFrame) -> pd.DataFrame:
     return out.groupby(["strategy_id", "variant_id", "direction"], sort=False, as_index=False).head(1).reset_index(drop=True)
 
 
-def render_news(meta: dict, signals: pd.DataFrame, leaderboard: pd.DataFrame, peak_timing: pd.DataFrame) -> str:
+def render_news(
+    meta: dict,
+    signals: pd.DataFrame,
+    leaderboard: pd.DataFrame,
+    peak_timing: pd.DataFrame,
+    sequence_summary: pd.DataFrame | None = None,
+    friction_thresholds: pd.DataFrame | None = None,
+) -> str:
+    sequence_summary = sequence_summary if sequence_summary is not None else pd.DataFrame()
+    friction_thresholds = friction_thresholds if friction_thresholds is not None else pd.DataFrame()
     lines = [
         "# Multi-Strategy Microcap / Small-Cap Research",
         "",
@@ -313,6 +329,18 @@ def render_news(meta: dict, signals: pd.DataFrame, leaderboard: pd.DataFrame, pe
             "median_peak_return_pct", "median_minutes_to_peak",
         ] if c in peak_timing.columns]
         lines.extend(["## Exact peak timing", "", peak_timing[cols].head(15).to_markdown(index=False), ""])
+    if not sequence_summary.empty:
+        cols = [c for c in [
+            "variant_id", "split", "sequence_bucket", "selected_rule_id", "n", "expectancy",
+            "profit_factor", "win_rate", "median_peak_return_pct", "median_minutes_to_peak",
+        ] if c in sequence_summary.columns]
+        lines.extend(["## Merciless repeat-entry edge", "", sequence_summary[cols].head(30).to_markdown(index=False), ""])
+    if not friction_thresholds.empty:
+        cols = [c for c in [
+            "variant_id", "split", "selected_rule_id", "grid_min_bps", "grid_max_bps",
+            "last_pf_ge_1_0_bps", "last_pf_ge_1_25_bps", "last_positive_expectancy_bps",
+        ] if c in friction_thresholds.columns]
+        lines.extend(["## Merciless friction resilience", "", friction_thresholds[cols].head(20).to_markdown(index=False), ""])
     lines.extend([
         "> Research only. Development/validation may select rules; locked test and forward observations never tune the selection score. Historical market-cap values that were not captured contemporaneously remain UNKNOWN rather than being backfilled from future data.",
         "",
@@ -380,6 +408,8 @@ def run_research(
         ranking_source = ranking_source[~ranking_source["variant_id"].isin(TRADABLE_VARIANT_EXCLUSIONS)]
     leaderboard = rank_strategies(ranking_source, min_n=min_n, baseline_slippage_bps=25.0) if not ranking_source.empty else pd.DataFrame()
     best_hold_times = _best_holds(leaderboard)
+    sequence_summary = sequence_bucket_summary(replays, best_hold_times, baseline_slippage_bps=25.0)
+    friction_thresholds = friction_threshold_summary(replays, best_hold_times)
 
     start_dates = [m.get("start_date") for m in meta_parts if m.get("start_date")]
     end_dates = [m.get("end_date") for m in meta_parts if m.get("end_date")]
@@ -394,6 +424,8 @@ def run_research(
         "replay_rows": int(len(replays)),
         "merciless_sequence_rows": int(len(sequence_edge)),
         "merciless_friction_rows": int(len(merciless_friction)),
+        "merciless_sequence_summary_rows": int(len(sequence_summary)),
+        "merciless_friction_summary_rows": int(len(friction_thresholds)),
         "selection": "VALIDATION_25BPS_ONLY",
         "serclick_historical_lock_end": str(SERCLICK_BASELINE_END),
         "serclick_forward_start": "2026-08-28",
@@ -410,9 +442,11 @@ def run_research(
     best_hold_times.to_csv(output_dir / "best_hold_times.csv", index=False)
     sequence_edge.to_csv(output_dir / "merciless_sequence_edge.csv", index=False)
     merciless_friction.to_csv(output_dir / "merciless_friction_break_even.csv", index=False)
+    sequence_summary.to_csv(output_dir / "merciless_sequence_summary.csv", index=False)
+    friction_thresholds.to_csv(output_dir / "merciless_friction_summary.csv", index=False)
     skips.to_csv(output_dir / "skips.csv", index=False)
     (output_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
-    news = render_news(meta, signals, leaderboard, peak_timing)
+    news = render_news(meta, signals, leaderboard, peak_timing, sequence_summary, friction_thresholds)
     (output_dir / "news.md").write_text(news, encoding="utf-8")
 
     latest = root / "data" / "latest"
@@ -423,6 +457,8 @@ def run_research(
     signals.to_csv(latest / "multistrategy_signals.csv", index=False)
     sequence_edge.to_csv(latest / "merciless_sequence_edge.csv", index=False)
     merciless_friction.to_csv(latest / "merciless_friction_break_even.csv", index=False)
+    sequence_summary.to_csv(latest / "merciless_sequence_summary.csv", index=False)
+    friction_thresholds.to_csv(latest / "merciless_friction_summary.csv", index=False)
     (latest / "multistrategy_news.md").write_text(news, encoding="utf-8")
     (latest / "multistrategy_run_meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
 
@@ -439,6 +475,8 @@ def run_research(
         skips=skips,
         sequence_edge=sequence_edge,
         friction_break_even=merciless_friction,
+        sequence_summary=sequence_summary,
+        friction_thresholds=friction_thresholds,
     )
 
 
@@ -476,6 +514,8 @@ def main() -> None:
         "leaderboard_rows": len(result.leaderboard),
         "merciless_sequence_rows": len(result.sequence_edge),
         "merciless_friction_rows": len(result.friction_break_even),
+        "merciless_sequence_summary_rows": len(result.sequence_summary),
+        "merciless_friction_summary_rows": len(result.friction_thresholds),
     }))
 
 

@@ -48,91 +48,77 @@ def _candidate_ok(context: dict[str, Any], cfg: MercilessConfig) -> bool:
 
 
 def _upper_wick_ratio(row: pd.Series) -> float:
-    high = float(row["high"])
-    low = float(row["low"])
-    close = float(row["close"])
-    open_ = float(row["open"])
+    high, low = float(row["high"]), float(row["low"])
     width = high - low
     if not np.isfinite(width) or width <= 0:
         return 0.0
-    return float(np.clip((high - max(open_, close)) / width, 0.0, 1.0))
+    return float(np.clip((high - max(float(row["open"]), float(row["close"]))) / width, 0.0, 1.0))
 
 
-def _score(
-    context: dict[str, Any],
-    cfg: MercilessConfig,
-    impulse_pct: float,
-    impulse_velocity: float,
-    retained_gain: float,
-    pullback_fraction: float,
-    volume_ratio: float,
-    clv: float,
-    upper_wick_ratio: float,
-) -> float:
+def _score(context: dict[str, Any], cfg: MercilessConfig, setup: dict[str, Any]) -> float:
     score = 0.0
     gap = _number(context.get("pm_gap_pct")) or 0.0
     turnover = _number(context.get("pm_dollar_turnover")) or 0.0
     rvol = _number(context.get("opening_rvol"))
+    impulse = float(setup.get("impulse_pct", 0.0))
+    velocity = float(setup.get("impulse_velocity_pct_per_min", 0.0))
+    retained = float(setup.get("retained_gain", 0.0))
+    pullback = float(setup.get("pullback_fraction", 1.0))
+    volume_ratio = float(setup.get("volume_ratio", 0.0))
+    clv = float(setup.get("clv", 0.5))
+    wick = float(setup.get("upper_wick_ratio", 1.0))
 
-    if gap >= cfg.min_gap_pct:
-        score += 8.0
-    if turnover >= 2.0 * cfg.min_pm_dollar_turnover:
-        score += 8.0
-    if rvol is not None and rvol >= 5.0:
-        score += 9.0
-
-    if impulse_pct >= cfg.min_impulse_pct:
-        score += 10.0
-    if impulse_velocity >= cfg.min_impulse_velocity_pct_per_min:
-        score += 10.0
-
-    if retained_gain >= cfg.min_retained_gain:
-        score += 10.0
-    if pullback_fraction <= min(cfg.max_pullback_fraction, 0.30):
-        score += 10.0
-
-    if volume_ratio >= cfg.min_breakout_volume_ratio:
-        score += 8.0
-    if clv >= 0.75:
-        score += 7.0
-
-    if upper_wick_ratio <= 0.25:
-        score += 8.0
-    if clv >= cfg.min_clv:
-        score += 7.0
-
+    score += 8.0 if gap >= cfg.min_gap_pct else 0.0
+    score += 8.0 if turnover >= 2.0 * cfg.min_pm_dollar_turnover else 0.0
+    score += 9.0 if rvol is not None and rvol >= 5.0 else 0.0
+    score += 10.0 if impulse >= cfg.min_impulse_pct else 0.0
+    score += 10.0 if velocity >= cfg.min_impulse_velocity_pct_per_min else 0.0
+    score += 10.0 if retained >= cfg.min_retained_gain else 0.0
+    score += 10.0 if pullback <= min(cfg.max_pullback_fraction, 0.30) else 0.0
+    score += 8.0 if volume_ratio >= cfg.min_breakout_volume_ratio else 0.0
+    score += 7.0 if clv >= 0.75 else 0.0
+    score += 8.0 if wick <= 0.25 else 0.0
+    score += 7.0 if clv >= cfg.min_clv else 0.0
     catalyst = str(context.get("catalyst_class") or "UNKNOWN").upper()
-    if catalyst not in {"", "UNKNOWN", "NONE", "NAN"}:
-        score += 5.0
+    score += 5.0 if catalyst not in {"", "UNKNOWN", "NONE", "NAN"} else 0.0
     return float(np.clip(score, 0.0, 100.0))
 
 
-def _signal(
-    context: dict[str, Any],
-    signal_row: pd.Series,
-    entry_row: pd.Series,
-    stop_reference: float,
-    cfg: MercilessConfig,
-    setup: dict[str, Any],
-    first_impulse_timestamp: Any,
-) -> dict[str, Any]:
+def _impulse_metrics(x: pd.DataFrame, prior_close: float, impulse_idx: int, through_idx: int) -> tuple[float, float, float]:
+    history = x.loc[impulse_idx:through_idx]
+    peak_idx = pd.to_numeric(history["high"], errors="coerce").idxmax()
+    peak = float(history.loc[peak_idx, "high"])
+    elapsed = max(1.0, float((pd.Timestamp(history.loc[peak_idx, "timestamp_et"]) - pd.Timestamp(x.loc[0, "timestamp_et"])).total_seconds() / 60.0))
+    impulse = peak / prior_close - 1.0
+    return peak, impulse, impulse / elapsed
+
+
+def _base_setup(x: pd.DataFrame, prior_close: float, impulse_idx: int, trigger_idx: int, low: float) -> dict[str, Any]:
+    peak, impulse, velocity = _impulse_metrics(x, prior_close, impulse_idx, max(impulse_idx, trigger_idx - 1))
+    denom = max(peak - prior_close, 1e-12)
+    row = x.loc[trigger_idx]
+    return {
+        "first_impulse_timestamp": x.loc[impulse_idx, "timestamp_et"],
+        "peak_price": peak,
+        "impulse_pct": impulse,
+        "impulse_velocity_pct_per_min": velocity,
+        "pullback_low": low,
+        "retained_gain": (low - prior_close) / denom,
+        "pullback_fraction": (peak - low) / denom,
+        "volume_ratio": float(row["volume_ratio"]) if pd.notna(row["volume_ratio"]) else 0.0,
+        "clv": float(row["clv"]),
+        "upper_wick_ratio": float(row["upper_wick_ratio"]),
+    }
+
+
+def _signal(context: dict[str, Any], variant_id: str, x: pd.DataFrame, signal_idx: int, stop_reference: float, cfg: MercilessConfig, setup: dict[str, Any], impulse_idx: int) -> dict[str, Any]:
+    signal_row, entry_row = x.loc[signal_idx], x.loc[signal_idx + 1]
     cap = _number(context.get("market_cap"))
     float_shares = _number(context.get("float_shares"))
     raw_entry = float(entry_row["open"])
-    score = _score(
-        context,
-        cfg,
-        float(setup["impulse_pct"]),
-        float(setup["impulse_velocity_pct_per_min"]),
-        float(setup["retained_gain"]),
-        float(setup["pullback_fraction"]),
-        float(setup["volume_ratio"]),
-        float(setup["clv"]),
-        float(setup["upper_wick_ratio"]),
-    )
     record = SignalRecord(
         strategy_id="MERCILESS_Q",
-        variant_id="MMQ_FIRST_PULLBACK",
+        variant_id=variant_id,
         symbol=str(context.get("symbol") or signal_row.get("symbol") or "UNKNOWN"),
         date=str(context.get("date") or signal_row["session_date"]),
         direction="LONG",
@@ -153,126 +139,132 @@ def _signal(
         borrow_status=str(context.get("borrow_status") or "UNKNOWN"),
         setup_metadata=setup,
     ).to_dict()
-    signal_ts = pd.Timestamp(signal_row["timestamp_et"])
-    impulse_ts = pd.Timestamp(first_impulse_timestamp)
-    record["split"] = str(context.get("split") or "forward")
-    record["pm_gap_pct"] = context.get("pm_gap_pct")
-    record["pm_dollar_turnover"] = context.get("pm_dollar_turnover")
-    record["opening_rvol"] = context.get("opening_rvol")
-    record["mmq_score"] = score
-    record["sequence_number"] = 1
-    record["minutes_since_prior_signal"] = np.nan
-    record["runner_age_minutes"] = float((signal_ts - impulse_ts).total_seconds() / 60.0)
+    record.update({
+        "split": str(context.get("split") or "forward"),
+        "pm_gap_pct": context.get("pm_gap_pct"),
+        "pm_dollar_turnover": context.get("pm_dollar_turnover"),
+        "opening_rvol": context.get("opening_rvol"),
+        "mmq_score": _score(context, cfg, setup),
+        "sequence_number": 1,
+        "minutes_since_prior_signal": np.nan,
+        "runner_age_minutes": float((pd.Timestamp(signal_row["timestamp_et"]) - pd.Timestamp(x.loc[impulse_idx, "timestamp_et"])).total_seconds() / 60.0),
+    })
     return record
 
 
-def generate_merciless_signals(
-    bars: pd.DataFrame,
-    context: dict[str, Any],
-    cfg: MercilessConfig | None = None,
-) -> pd.DataFrame:
+def _first_pullback_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[tuple[int, str, float, dict[str, Any]]]:
+    start = impulse_idx + cfg.min_contraction_bars + 1
+    for trigger_idx in range(start, len(x) - 1):
+        contraction = x.loc[max(impulse_idx + 1, trigger_idx - cfg.max_contraction_bars): trigger_idx - 1]
+        if len(contraction) < cfg.min_contraction_bars:
+            continue
+        low = float(contraction["low"].min())
+        setup = _base_setup(x, prior_close, impulse_idx, trigger_idx, low)
+        if setup["retained_gain"] < cfg.min_retained_gain or setup["pullback_fraction"] > cfg.max_pullback_fraction:
+            continue
+        resistance = float(contraction["high"].max())
+        row = x.loc[trigger_idx]
+        if (float(row["close"]) > resistance and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
+                and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
+            setup.update({"contraction_bars": int(len(contraction)), "contraction_high": resistance})
+            return [(trigger_idx, "MMQ_FIRST_PULLBACK", low, setup)]
+    return []
+
+
+def _micro_breakout_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[tuple[int, str, float, dict[str, Any]]]:
+    for trigger_idx in range(impulse_idx + 3, len(x) - 1):
+        window = x.loc[max(impulse_idx, trigger_idx - 4): trigger_idx - 1]
+        if len(window) < 3:
+            continue
+        resistance = float(window["high"].max())
+        tests = int((pd.to_numeric(window["high"], errors="coerce") >= resistance * 0.995).sum())
+        if tests < 2:
+            continue
+        low = float(window["low"].min())
+        setup = _base_setup(x, prior_close, impulse_idx, trigger_idx, low)
+        row = x.loc[trigger_idx]
+        if (float(row["close"]) > resistance and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
+                and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
+            setup.update({"resistance": resistance, "resistance_tests": tests, "compression_bars": int(len(window))})
+            return [(trigger_idx, "MMQ_MICRO_BREAKOUT", low, setup)]
+    return []
+
+
+def _vwap_reset_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[tuple[int, str, float, dict[str, Any]]]:
+    touch_idx = None
+    for idx in range(impulse_idx + 1, len(x) - 1):
+        vwap = _number(x.loc[idx, "session_vwap"])
+        if vwap is not None and float(x.loc[idx, "low"]) <= vwap and float(x.loc[idx, "close"]) <= vwap:
+            touch_idx = idx
+            break
+    if touch_idx is None:
+        return []
+    reset_low = float(x.loc[impulse_idx + 1:touch_idx, "low"].min())
+    for trigger_idx in range(touch_idx + 1, len(x) - 1):
+        row = x.loc[trigger_idx]
+        vwap = _number(row["session_vwap"])
+        if vwap is None:
+            continue
+        setup = _base_setup(x, prior_close, impulse_idx, trigger_idx, reset_low)
+        if setup["retained_gain"] < cfg.min_retained_gain:
+            continue
+        if (float(row["close"]) > vwap and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
+                and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
+            setup.update({"vwap_touch_timestamp": x.loc[touch_idx, "timestamp_et"], "reclaim_vwap": vwap})
+            return [(trigger_idx, "MMQ_VWAP_RESET", reset_low, setup)]
+    return []
+
+
+def _trap_reclaim_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[tuple[int, str, float, dict[str, Any]]]:
+    for break_idx in range(impulse_idx + 3, len(x) - 2):
+        prior = x.loc[max(impulse_idx + 1, break_idx - 3): break_idx - 1]
+        if len(prior) < 2:
+            continue
+        broken_level = float(prior["low"].min())
+        break_row = x.loc[break_idx]
+        if not (float(break_row["low"]) < broken_level and float(break_row["close"]) < broken_level):
+            continue
+        trap_low = float(break_row["low"])
+        trigger_idx = break_idx + 1
+        row = x.loc[trigger_idx]
+        setup = _base_setup(x, prior_close, impulse_idx, trigger_idx, trap_low)
+        if (float(row["close"]) > broken_level and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
+                and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
+            setup.update({"broken_level": broken_level, "trap_break_timestamp": break_row["timestamp_et"]})
+            return [(trigger_idx, "MMQ_TRAP_RECLAIM", trap_low, setup)]
+    return []
+
+
+def generate_merciless_signals(bars: pd.DataFrame, context: dict[str, Any], cfg: MercilessConfig | None = None) -> pd.DataFrame:
     cfg = cfg or MercilessConfig()
     if bars.empty or not _candidate_ok(context, cfg):
         return pd.DataFrame()
-
     prior_close = float(context["prior_close"])
     x = attach_session_vwap(bars)
     if x.empty:
         return pd.DataFrame()
     x["prior_volume_median"] = rolling_prior_volume_median(x, cfg.volume_lookback_bars)
-    x["volume_ratio"] = (
-        pd.to_numeric(x["volume"], errors="coerce")
-        / x["prior_volume_median"].replace(0, np.nan)
-    )
+    x["volume_ratio"] = pd.to_numeric(x["volume"], errors="coerce") / x["prior_volume_median"].replace(0, np.nan)
     x["clv"] = x.apply(close_location_value, axis=1)
     x["upper_wick_ratio"] = x.apply(_upper_wick_ratio, axis=1)
     x["running_high"] = pd.to_numeric(x["high"], errors="coerce").cummax()
     x["impulse_pct"] = x["running_high"] / prior_close - 1.0
-
-    impulse_candidates = x.index[x["impulse_pct"] >= cfg.min_impulse_pct].tolist()
-    if not impulse_candidates:
+    candidates = x.index[x["impulse_pct"] >= cfg.min_impulse_pct].tolist()
+    if not candidates:
         return pd.DataFrame()
-    impulse_idx = int(impulse_candidates[0])
-    impulse_ts = x.loc[impulse_idx, "timestamp_et"]
-    elapsed = max(
-        1.0,
-        float((pd.Timestamp(impulse_ts) - pd.Timestamp(x.loc[0, "timestamp_et"])).total_seconds() / 60.0),
-    )
-    initial_impulse_pct = float(x.loc[impulse_idx, "impulse_pct"])
-    initial_velocity = initial_impulse_pct / elapsed
-    if initial_velocity < cfg.min_impulse_velocity_pct_per_min:
+    impulse_idx = int(candidates[0])
+    elapsed = max(1.0, float((pd.Timestamp(x.loc[impulse_idx, "timestamp_et"]) - pd.Timestamp(x.loc[0, "timestamp_et"])).total_seconds() / 60.0))
+    if float(x.loc[impulse_idx, "impulse_pct"]) / elapsed < cfg.min_impulse_velocity_pct_per_min:
         return pd.DataFrame()
 
-    first_trigger_idx = impulse_idx + cfg.min_contraction_bars + 1
-    if first_trigger_idx >= len(x) - 0:
-        return pd.DataFrame()
-
-    for trigger_idx in range(first_trigger_idx, len(x) - 1):
-        contraction_start = max(impulse_idx + 1, trigger_idx - cfg.max_contraction_bars)
-        contraction = x.loc[contraction_start: trigger_idx - 1]
-        if len(contraction) < cfg.min_contraction_bars:
-            continue
-
-        history = x.loc[impulse_idx: trigger_idx - 1]
-        peak_price = float(pd.to_numeric(history["high"], errors="coerce").max())
-        pullback_low = float(pd.to_numeric(contraction["low"], errors="coerce").min())
-        denominator = peak_price - prior_close
-        if not np.isfinite(denominator) or denominator <= 0:
-            continue
-        retained_gain = (pullback_low - prior_close) / denominator
-        pullback_fraction = (peak_price - pullback_low) / denominator
-        if retained_gain < cfg.min_retained_gain or pullback_fraction > cfg.max_pullback_fraction:
-            continue
-
-        contraction_high = float(pd.to_numeric(contraction["high"], errors="coerce").max())
-        row = x.loc[trigger_idx]
-        entry = x.loc[trigger_idx + 1]
-        if entry["session_date"] != row["session_date"]:
-            continue
-        volume_ratio = _number(row["volume_ratio"])
-        if volume_ratio is None:
-            continue
-        clv = float(row["clv"])
-        wick = float(row["upper_wick_ratio"])
-        if not (
-            float(row["close"]) > contraction_high
-            and volume_ratio >= cfg.min_breakout_volume_ratio
-            and clv >= cfg.min_clv
-            and wick <= cfg.max_upper_wick_ratio
-        ):
-            continue
-
-        peak_timestamp = history.loc[pd.to_numeric(history["high"], errors="coerce").idxmax(), "timestamp_et"]
-        peak_elapsed = max(
-            1.0,
-            float((pd.Timestamp(peak_timestamp) - pd.Timestamp(x.loc[0, "timestamp_et"])).total_seconds() / 60.0),
-        )
-        impulse_pct = peak_price / prior_close - 1.0
-        impulse_velocity = impulse_pct / peak_elapsed
-        setup = {
-            "first_impulse_timestamp": impulse_ts,
-            "peak_price": peak_price,
-            "impulse_pct": impulse_pct,
-            "impulse_velocity_pct_per_min": impulse_velocity,
-            "contraction_bars": int(len(contraction)),
-            "contraction_high": contraction_high,
-            "pullback_low": pullback_low,
-            "retained_gain": retained_gain,
-            "pullback_fraction": pullback_fraction,
-            "volume_ratio": volume_ratio,
-            "clv": clv,
-            "upper_wick_ratio": wick,
-        }
-        return pd.DataFrame([
-            _signal(
-                context,
-                row,
-                entry,
-                pullback_low,
-                cfg,
-                setup,
-                impulse_ts,
-            )
-        ])
-
-    return pd.DataFrame()
+    events: list[tuple[int, str, float, dict[str, Any]]] = []
+    events.extend(_first_pullback_events(x, prior_close, impulse_idx, cfg))
+    events.extend(_micro_breakout_events(x, prior_close, impulse_idx, cfg))
+    events.extend(_vwap_reset_events(x, prior_close, impulse_idx, cfg))
+    events.extend(_trap_reclaim_events(x, prior_close, impulse_idx, cfg))
+    rows = [
+        _signal(context, variant, x, idx, stop, cfg, setup, impulse_idx)
+        for idx, variant, stop, setup in sorted(events, key=lambda event: (event[0], event[1]))
+        if idx + 1 < len(x) and x.loc[idx + 1, "session_date"] == x.loc[idx, "session_date"]
+    ]
+    return pd.DataFrame(rows)

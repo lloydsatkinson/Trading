@@ -25,6 +25,7 @@ from scanner.strategies.dan_irish.research import (
     add_retained_gain_bucket,
     build_dan_summaries,
     generate_dan_signal_set,
+    make_cached_symbol_minute_loader,
     persist_dan_rule_identity,
     replay_dan_swing_signals,
     run_study_with_optional_dan,
@@ -371,6 +372,11 @@ def run_research(
 
     needs_price_volume = bool(selected & {"orb", "vwap"})
     needs_dan = "dan" in selected
+    dan_minute_loader = (
+        make_cached_symbol_minute_loader(_load_minute_bars, max_days=24)
+        if needs_dan
+        else _load_symbol_minute_bars
+    )
     if needs_price_volume or needs_dan:
         study = MultiStrategyStudy(root=root, feed=feed, sessions=sessions, end_date=end_date)
         study_meta = run_study_with_optional_dan(
@@ -398,7 +404,7 @@ def run_research(
                 feed,
                 study,
                 study_meta,
-                _load_symbol_minute_bars,
+                dan_minute_loader,
             )
             if not dan_signals.empty:
                 signal_frames.append(dan_signals)
@@ -441,7 +447,7 @@ def run_research(
                 swing_signals,
                 study_meta.get("daily_bars", pd.DataFrame()),
                 study_meta.get("split_end_dates", {}),
-                _load_symbol_minute_bars,
+                dan_minute_loader,
             )
             if not swing_replays.empty:
                 audit_status = str(study_meta.get("corporate_action_audit_status") or "UNAVAILABLE").upper()

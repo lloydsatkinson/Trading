@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable
@@ -23,6 +24,38 @@ from .rules import default_dan_swing_rules
 from .swing import generate_dan_swing_signals
 
 MinuteCacheLoader = Callable[[Path, str, str, str, str], pd.DataFrame]
+DayMinuteLoader = Callable[[Path, str, str, str], pd.DataFrame]
+
+
+def make_cached_symbol_minute_loader(
+    day_loader: DayMinuteLoader,
+    max_days: int = 24,
+) -> MinuteCacheLoader:
+    """Bound full-day minute decompression to once per recently used cache key."""
+    limit = int(max_days)
+    if limit <= 0:
+        raise ValueError("max_days must be positive")
+    cache: OrderedDict[tuple[str, str, str, str], dict[str, pd.DataFrame]] = OrderedDict()
+
+    def load(root: Path, namespace: str, day: str, feed: str, symbol: str) -> pd.DataFrame:
+        key = (str(Path(root)), str(namespace), str(day), str(feed).lower())
+        if key in cache:
+            by_symbol = cache.pop(key)
+            cache[key] = by_symbol
+        else:
+            frame = day_loader(Path(root), str(namespace), str(day), str(feed))
+            by_symbol: dict[str, pd.DataFrame] = {}
+            if frame is not None and not frame.empty and "symbol" in frame.columns:
+                symbols = frame["symbol"].astype(str)
+                for value in symbols.unique():
+                    by_symbol[str(value)] = frame.loc[symbols.eq(str(value))].copy()
+            cache[key] = by_symbol
+            while len(cache) > limit:
+                cache.popitem(last=False)
+        selected = by_symbol.get(str(symbol))
+        return selected.copy() if selected is not None else pd.DataFrame()
+
+    return load
 
 
 def run_study_with_optional_dan(study, *, needs_price_volume: bool, needs_dan: bool) -> dict:
@@ -32,23 +65,32 @@ def run_study_with_optional_dan(study, *, needs_price_volume: bool, needs_dan: b
     return study.run(include_dan_candidates=True) if needs_dan else study.run()
 
 
-def _daily_dates_for_symbol(daily_bars: pd.DataFrame, symbol: str) -> list[date]:
+def _daily_dates_by_symbol(daily_bars: pd.DataFrame) -> dict[str, list[date]]:
     if daily_bars.empty:
-        return []
+        return {}
     x = prepare_intraday_bars(daily_bars)
-    x = x[x["symbol"].astype(str).eq(str(symbol))]
-    return sorted(set(x["session_date"].tolist()))
+    if x.empty or "symbol" not in x.columns:
+        return {}
+    return {
+        str(symbol): sorted(set(group["session_date"].tolist()))
+        for symbol, group in x.groupby(x["symbol"].astype(str), sort=False)
+    }
+
+
+def _daily_dates_for_symbol(daily_bars: pd.DataFrame, symbol: str) -> list[date]:
+    return _daily_dates_by_symbol(daily_bars).get(str(symbol), [])
 
 
 def ensure_dan_followup_caches(study, contexts: pd.DataFrame, daily_bars: pd.DataFrame, cfg: DanConfig | None = None) -> None:
     cfg = cfg or DanConfig()
     if contexts.empty or daily_bars.empty:
         return
+    daily_dates_by_symbol = _daily_dates_by_symbol(daily_bars)
     symbols_by_day: dict[date, set[str]] = {}
     for context in contexts.to_dict("records"):
         symbol = str(context["symbol"])
         day0 = pd.Timestamp(context["date"]).date()
-        later = [day for day in _daily_dates_for_symbol(daily_bars, symbol) if day > day0][: int(cfg.followup_sessions)]
+        later = [day for day in daily_dates_by_symbol.get(symbol, []) if day > day0][: int(cfg.followup_sessions)]
         for day in later:
             symbols_by_day.setdefault(day, set()).add(symbol)
     for day in sorted(symbols_by_day):
@@ -126,8 +168,9 @@ def replay_dan_swing_signals(
     if signals.empty:
         return pd.DataFrame(), pd.DataFrame()
     root = Path(root)
+    complete_daily_dates = _daily_dates_by_symbol(daily_bars)
     daily_dates_by_symbol = {
-        symbol: _daily_dates_for_symbol(daily_bars, symbol)
+        symbol: complete_daily_dates.get(symbol, [])
         for symbol in signals["symbol"].astype(str).unique()
     }
     all_dates = sorted({d for dates in daily_dates_by_symbol.values() for d in dates})

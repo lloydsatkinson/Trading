@@ -21,7 +21,9 @@ class FeedHealthMonitor:
         self._fresh_seen_in_recovery = False
 
     def connect(self) -> None:
-        self.begin_recovery()
+        self.state = FeedHealth.RECOVERING
+        self._recovering = False
+        self._fresh_seen_in_recovery = False
 
     def disconnect(self) -> None:
         self.state = FeedHealth.DISCONNECTED

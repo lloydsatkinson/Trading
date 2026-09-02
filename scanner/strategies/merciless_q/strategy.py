@@ -19,6 +19,8 @@ from scanner.core.models import SignalRecord, market_cap_bucket, market_cap_in_p
 from scanner.core.replay import apply_entry_slippage
 from .config import MercilessConfig
 
+Event = tuple[int, str, float, dict[str, Any]]
+
 
 def _number(value: Any) -> float | None:
     try:
@@ -67,7 +69,6 @@ def _score(context: dict[str, Any], cfg: MercilessConfig, setup: dict[str, Any])
     volume_ratio = float(setup.get("volume_ratio", 0.0))
     clv = float(setup.get("clv", 0.5))
     wick = float(setup.get("upper_wick_ratio", 1.0))
-
     score += 8.0 if gap >= cfg.min_gap_pct else 0.0
     score += 8.0 if turnover >= 2.0 * cfg.min_pm_dollar_turnover else 0.0
     score += 9.0 if rvol is not None and rvol >= 5.0 else 0.0
@@ -111,7 +112,7 @@ def _base_setup(x: pd.DataFrame, prior_close: float, impulse_idx: int, trigger_i
     }
 
 
-def _signal(context: dict[str, Any], variant_id: str, x: pd.DataFrame, signal_idx: int, stop_reference: float, cfg: MercilessConfig, setup: dict[str, Any], impulse_idx: int) -> dict[str, Any]:
+def _signal(context: dict[str, Any], variant_id: str, x: pd.DataFrame, signal_idx: int, stop_reference: float, cfg: MercilessConfig, setup: dict[str, Any], impulse_idx: int, sequence_number: int, prior_signal_idx: int | None) -> dict[str, Any]:
     signal_row, entry_row = x.loc[signal_idx], x.loc[signal_idx + 1]
     cap = _number(context.get("market_cap"))
     float_shares = _number(context.get("float_shares"))
@@ -139,23 +140,28 @@ def _signal(context: dict[str, Any], variant_id: str, x: pd.DataFrame, signal_id
         borrow_status=str(context.get("borrow_status") or "UNKNOWN"),
         setup_metadata=setup,
     ).to_dict()
+    minutes_since = np.nan
+    if prior_signal_idx is not None:
+        minutes_since = float((pd.Timestamp(signal_row["timestamp_et"]) - pd.Timestamp(x.loc[prior_signal_idx, "timestamp_et"])).total_seconds() / 60.0)
     record.update({
         "split": str(context.get("split") or "forward"),
         "pm_gap_pct": context.get("pm_gap_pct"),
         "pm_dollar_turnover": context.get("pm_dollar_turnover"),
         "opening_rvol": context.get("opening_rvol"),
         "mmq_score": _score(context, cfg, setup),
-        "sequence_number": 1,
-        "minutes_since_prior_signal": np.nan,
+        "sequence_number": int(sequence_number),
+        "minutes_since_prior_signal": minutes_since,
         "runner_age_minutes": float((pd.Timestamp(signal_row["timestamp_et"]) - pd.Timestamp(x.loc[impulse_idx, "timestamp_et"])).total_seconds() / 60.0),
     })
     return record
 
 
-def _first_pullback_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[tuple[int, str, float, dict[str, Any]]]:
+def _first_pullback_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[Event]:
+    events: list[Event] = []
     start = impulse_idx + cfg.min_contraction_bars + 1
     for trigger_idx in range(start, len(x) - 1):
-        contraction = x.loc[max(impulse_idx + 1, trigger_idx - cfg.max_contraction_bars): trigger_idx - 1]
+        contraction_start = max(impulse_idx + 1, trigger_idx - cfg.max_contraction_bars)
+        contraction = x.loc[contraction_start: trigger_idx - 1]
         if len(contraction) < cfg.min_contraction_bars:
             continue
         low = float(contraction["low"].min())
@@ -166,14 +172,20 @@ def _first_pullback_events(x: pd.DataFrame, prior_close: float, impulse_idx: int
         row = x.loc[trigger_idx]
         if (float(row["close"]) > resistance and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
                 and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
-            setup.update({"contraction_bars": int(len(contraction)), "contraction_high": resistance})
-            return [(trigger_idx, "MMQ_FIRST_PULLBACK", low, setup)]
-    return []
+            setup.update({
+                "contraction_bars": int(len(contraction)),
+                "contraction_high": resistance,
+                "reset_anchor_idx": max(impulse_idx + 1, trigger_idx - cfg.min_contraction_bars),
+            })
+            events.append((trigger_idx, "MMQ_FIRST_PULLBACK", low, setup))
+    return events
 
 
-def _micro_breakout_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[tuple[int, str, float, dict[str, Any]]]:
+def _micro_breakout_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[Event]:
+    events: list[Event] = []
     for trigger_idx in range(impulse_idx + 3, len(x) - 1):
-        window = x.loc[max(impulse_idx, trigger_idx - 4): trigger_idx - 1]
+        window_start = max(impulse_idx, trigger_idx - 4)
+        window = x.loc[window_start: trigger_idx - 1]
         if len(window) < 3:
             continue
         resistance = float(window["high"].max())
@@ -185,37 +197,45 @@ def _micro_breakout_events(x: pd.DataFrame, prior_close: float, impulse_idx: int
         row = x.loc[trigger_idx]
         if (float(row["close"]) > resistance and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
                 and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
-            setup.update({"resistance": resistance, "resistance_tests": tests, "compression_bars": int(len(window))})
-            return [(trigger_idx, "MMQ_MICRO_BREAKOUT", low, setup)]
-    return []
+            setup.update({
+                "resistance": resistance,
+                "resistance_tests": tests,
+                "compression_bars": int(len(window)),
+                "reset_anchor_idx": max(impulse_idx + 1, trigger_idx - 3),
+            })
+            events.append((trigger_idx, "MMQ_MICRO_BREAKOUT", low, setup))
+    return events
 
 
-def _vwap_reset_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[tuple[int, str, float, dict[str, Any]]]:
-    touch_idx = None
-    for idx in range(impulse_idx + 1, len(x) - 1):
-        vwap = _number(x.loc[idx, "session_vwap"])
-        if vwap is not None and float(x.loc[idx, "low"]) <= vwap and float(x.loc[idx, "close"]) <= vwap:
-            touch_idx = idx
-            break
-    if touch_idx is None:
-        return []
-    reset_low = float(x.loc[impulse_idx + 1:touch_idx, "low"].min())
-    for trigger_idx in range(touch_idx + 1, len(x) - 1):
-        row = x.loc[trigger_idx]
-        vwap = _number(row["session_vwap"])
-        if vwap is None:
+def _vwap_reset_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[Event]:
+    events: list[Event] = []
+    for touch_idx in range(impulse_idx + 1, len(x) - 2):
+        vwap_touch = _number(x.loc[touch_idx, "session_vwap"])
+        if vwap_touch is None or not (float(x.loc[touch_idx, "low"]) <= vwap_touch and float(x.loc[touch_idx, "close"]) <= vwap_touch):
             continue
-        setup = _base_setup(x, prior_close, impulse_idx, trigger_idx, reset_low)
-        if setup["retained_gain"] < cfg.min_retained_gain:
-            continue
-        if (float(row["close"]) > vwap and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
-                and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
-            setup.update({"vwap_touch_timestamp": x.loc[touch_idx, "timestamp_et"], "reclaim_vwap": vwap})
-            return [(trigger_idx, "MMQ_VWAP_RESET", reset_low, setup)]
-    return []
+        reset_low = float(x.loc[max(impulse_idx + 1, touch_idx - 3):touch_idx, "low"].min())
+        for trigger_idx in range(touch_idx + 1, min(len(x) - 1, touch_idx + 4)):
+            row = x.loc[trigger_idx]
+            vwap = _number(row["session_vwap"])
+            if vwap is None:
+                continue
+            setup = _base_setup(x, prior_close, impulse_idx, trigger_idx, reset_low)
+            if setup["retained_gain"] < cfg.min_retained_gain:
+                continue
+            if (float(row["close"]) > vwap and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
+                    and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
+                setup.update({
+                    "vwap_touch_timestamp": x.loc[touch_idx, "timestamp_et"],
+                    "reclaim_vwap": vwap,
+                    "reset_anchor_idx": touch_idx,
+                })
+                events.append((trigger_idx, "MMQ_VWAP_RESET", reset_low, setup))
+                break
+    return events
 
 
-def _trap_reclaim_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[tuple[int, str, float, dict[str, Any]]]:
+def _trap_reclaim_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, cfg: MercilessConfig) -> list[Event]:
+    events: list[Event] = []
     for break_idx in range(impulse_idx + 3, len(x) - 2):
         prior = x.loc[max(impulse_idx + 1, break_idx - 3): break_idx - 1]
         if len(prior) < 2:
@@ -230,9 +250,38 @@ def _trap_reclaim_events(x: pd.DataFrame, prior_close: float, impulse_idx: int, 
         setup = _base_setup(x, prior_close, impulse_idx, trigger_idx, trap_low)
         if (float(row["close"]) > broken_level and setup["volume_ratio"] >= cfg.min_breakout_volume_ratio
                 and setup["clv"] >= cfg.min_clv and setup["upper_wick_ratio"] <= cfg.max_upper_wick_ratio):
-            setup.update({"broken_level": broken_level, "trap_break_timestamp": break_row["timestamp_et"]})
-            return [(trigger_idx, "MMQ_TRAP_RECLAIM", trap_low, setup)]
-    return []
+            setup.update({
+                "broken_level": broken_level,
+                "trap_break_timestamp": break_row["timestamp_et"],
+                "reset_anchor_idx": break_idx,
+            })
+            events.append((trigger_idx, "MMQ_TRAP_RECLAIM", trap_low, setup))
+    return events
+
+
+def _accept_events(events: list[Event], cfg: MercilessConfig) -> list[Event]:
+    accepted: list[Event] = []
+    last_idx: int | None = None
+    last_variant_idx: dict[str, int] = {}
+    used_signal_indices: set[int] = set()
+    priority = {"MMQ_FIRST_PULLBACK": 0, "MMQ_MICRO_BREAKOUT": 1, "MMQ_VWAP_RESET": 2, "MMQ_TRAP_RECLAIM": 3}
+    for event in sorted(events, key=lambda e: (e[0], priority.get(e[1], 99))):
+        idx, variant, _, setup = event
+        if idx in used_signal_indices:
+            continue
+        if last_idx is not None and idx - last_idx < cfg.cooldown_bars:
+            continue
+        previous_variant_idx = last_variant_idx.get(variant)
+        reset_anchor = int(setup.get("reset_anchor_idx", idx))
+        if previous_variant_idx is not None and reset_anchor <= previous_variant_idx:
+            continue
+        accepted.append(event)
+        used_signal_indices.add(idx)
+        last_idx = idx
+        last_variant_idx[variant] = idx
+        if len(accepted) >= cfg.max_signals_per_symbol:
+            break
+    return accepted
 
 
 def generate_merciless_signals(bars: pd.DataFrame, context: dict[str, Any], cfg: MercilessConfig | None = None) -> pd.DataFrame:
@@ -257,14 +306,17 @@ def generate_merciless_signals(bars: pd.DataFrame, context: dict[str, Any], cfg:
     if float(x.loc[impulse_idx, "impulse_pct"]) / elapsed < cfg.min_impulse_velocity_pct_per_min:
         return pd.DataFrame()
 
-    events: list[tuple[int, str, float, dict[str, Any]]] = []
+    events: list[Event] = []
     events.extend(_first_pullback_events(x, prior_close, impulse_idx, cfg))
     events.extend(_micro_breakout_events(x, prior_close, impulse_idx, cfg))
     events.extend(_vwap_reset_events(x, prior_close, impulse_idx, cfg))
     events.extend(_trap_reclaim_events(x, prior_close, impulse_idx, cfg))
-    rows = [
-        _signal(context, variant, x, idx, stop, cfg, setup, impulse_idx)
-        for idx, variant, stop, setup in sorted(events, key=lambda event: (event[0], event[1]))
-        if idx + 1 < len(x) and x.loc[idx + 1, "session_date"] == x.loc[idx, "session_date"]
-    ]
+    accepted = _accept_events(events, cfg)
+    rows: list[dict[str, Any]] = []
+    prior_idx: int | None = None
+    for sequence_number, (idx, variant, stop, setup) in enumerate(accepted, start=1):
+        if idx + 1 >= len(x) or x.loc[idx + 1, "session_date"] != x.loc[idx, "session_date"]:
+            continue
+        rows.append(_signal(context, variant, x, idx, stop, cfg, setup, impulse_idx, sequence_number, prior_idx))
+        prior_idx = idx
     return pd.DataFrame(rows)

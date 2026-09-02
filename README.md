@@ -12,6 +12,26 @@ Primary objectives:
 
 This repository is for research and paper/backtest validation. It does not auto-route live orders.
 
+## Unified real-time scanner — Phase 1
+
+The repository now contains the **API-free core** of the unified real-time scanner. Phase 1 evaluates completed one-minute bar prefixes through a shared live engine and currently proves parity for:
+
+- Stocks-in-Play ORB;
+- High-RVOL VWAP Momentum/Reclaim;
+- SerClick / Leo.
+
+The Phase 1 live core includes point-in-time symbol state, shared features, authoritative research/production gating, lifecycle de-duplication, feed-health suppression, correlation-aware consensus ranking and an idempotent SQLite forward ledger with restart restoration.
+
+Important boundaries:
+
+- **no real SIP/WebSocket stream yet** — the end-to-end scanner is currently driven by a deterministic fake completed-bar stream;
+- **no broker order routing**;
+- research-only strategies remain explicitly labelled and cannot masquerade as production `FIRE` signals;
+- stale/disconnected/recovering feed states block new production FIRE;
+- historical ORB/VWAP research continues to use next-bar execution while the live trigger itself is surfaced causally on the completed signal bar.
+
+See `docs/research/unified_live_scanner_phase1.md` for the stable-ID scheme, batch/live parity rules, consensus multipliers, 35/20/15/10/10/5/5 ranking composition, SQLite schema and Phase 2 boundary.
+
 ## Multi-strategy microcap research
 
 The shared research framework compares three mechanically defined signal families:

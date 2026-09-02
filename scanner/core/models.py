@@ -32,6 +32,16 @@ def market_cap_bucket(value: Any) -> str:
 
 
 @dataclass(frozen=True)
+class TriggerDecision:
+    variant_id: str
+    direction: str
+    signal_timestamp: Any
+    reference_price: float
+    stop_reference: float | None = None
+    setup_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class SignalRecord:
     strategy_id: str
     variant_id: str

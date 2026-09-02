@@ -1,0 +1,89 @@
+name: Dan 60D Research
+
+# Trigger marker: verified Dan branch ready for 60-session SIP research.
+on:
+  workflow_dispatch:
+    inputs:
+      sessions:
+        description: Number of completed trading sessions
+        required: false
+        default: "60"
+      min_n:
+        description: Minimum validation sample size for leaderboard rows
+        required: false
+        default: "20"
+  push:
+    branches:
+      - dan-irish-research-v1
+    paths:
+      - .github/workflows/dan-60d.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dan-60d-research-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dan-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      APCA_API_BASE_URL: https://paper-api.alpaca.markets
+      PYTHONPATH: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Restore Dan market-data cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache/multistrategy_alpaca
+          key: dan-60d-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            dan-60d-${{ runner.os }}-
+            multistrategy-${{ runner.os }}-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Verify branch before data run
+        run: |
+          pytest -q
+          python -m compileall -q scanner scripts
+      - name: Run Dan-only SIP research
+        shell: bash
+        run: |
+          SESSIONS="${{ github.event.inputs.sessions }}"
+          MIN_N="${{ github.event.inputs.min_n }}"
+          if [ -z "$SESSIONS" ]; then SESSIONS=60; fi
+          if [ -z "$MIN_N" ]; then MIN_N=20; fi
+          python scripts/run_strategy_research.py \
+            --strategy dan \
+            --feed sip \
+            --sessions "$SESSIONS" \
+            --min-n "$MIN_N"
+      - name: Publish Dan research summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f data/latest/multistrategy_news.md ]; then
+            cat data/latest/multistrategy_news.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dan research did not produce multistrategy_news.md. Inspect logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload Dan research artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dan-60d-${{ github.run_id }}
+          path: |
+            data/latest/
+            data/research/multistrategy/
+          if-no-files-found: warn
+          retention-days: 30

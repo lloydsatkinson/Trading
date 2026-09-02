@@ -19,3 +19,4 @@ class MultiStrategyConfig:
     early_scan_timeframe: str = "30Min"
     minute_timeframe: str = "1Min"
     opening_history_timeframe: str = "5Min"
+    bar_adjustment: str = "raw"

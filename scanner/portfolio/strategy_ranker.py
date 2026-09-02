@@ -43,15 +43,33 @@ def _slippage_component(group: pd.DataFrame) -> tuple[float, float]:
     return (_clip01(last_profitable / max_tested) if max_tested > 0 else 0.5), last_profitable
 
 
-def _split_metric(summary: pd.DataFrame, split: str, key: tuple, baseline_slippage_bps: float) -> dict:
-    strategy_id, variant_id, direction, rule_id = key
-    x = summary[
-        summary["strategy_id"].eq(strategy_id)
-        & summary["variant_id"].eq(variant_id)
-        & summary["direction"].eq(direction)
-        & summary["rule_id"].eq(rule_id)
-        & summary["split"].eq(split)
-    ].copy()
+def _identity_columns(summary: pd.DataFrame) -> list[str]:
+    cols = ["strategy_id", "variant_id", "direction", "rule_id"]
+    # Signal-qualification thresholds are a separate research identity from the
+    # replay/exit rule. Preserve them whenever the summary supplies setup_id.
+    if "setup_id" in summary.columns:
+        cols.append("setup_id")
+    return cols
+
+
+def _identity_mask(summary: pd.DataFrame, identity_cols: list[str], key: tuple) -> pd.Series:
+    mask = pd.Series(True, index=summary.index)
+    for column, value in zip(identity_cols, key):
+        if pd.isna(value):
+            mask &= summary[column].isna()
+        else:
+            mask &= summary[column].eq(value)
+    return mask
+
+
+def _split_metric(
+    summary: pd.DataFrame,
+    split: str,
+    identity_cols: list[str],
+    key: tuple,
+    baseline_slippage_bps: float,
+) -> dict:
+    x = summary[_identity_mask(summary, identity_cols, key) & summary["split"].eq(split)].copy()
     if x.empty:
         return {}
     if "slippage_bps" in x.columns:
@@ -64,7 +82,8 @@ def _split_metric(summary: pd.DataFrame, split: str, key: tuple, baseline_slippa
     row = x.iloc[0]
     fields = (
         "n", "profit_factor", "expectancy", "median_return", "max_drawdown",
-        "stop_pct", "target_pct", "max_hold_minutes", "target_r_multiple", "hold_to_eod",
+        "stop_mode", "stop_pct", "target_pct", "max_hold_minutes", "max_hold_sessions",
+        "target_r_multiple", "trailing_exit", "hold_to_eod",
     )
     return {name: row.get(name) for name in fields if name in row.index}
 
@@ -75,7 +94,7 @@ def rank_strategies(
     baseline_slippage_bps: float = 25.0,
     production_min_expectancy: float = 0.05,
 ) -> pd.DataFrame:
-    """Rank fixed strategy/rule identities using validation data only.
+    """Rank fixed strategy/setup/rule identities using validation data only.
 
     Test and forward metrics are joined after the selection score is computed so
     they can be inspected without influencing rule choice. Research candidates
@@ -91,25 +110,21 @@ def rank_strategies(
         raise ValueError(f"summary missing required columns: {sorted(missing)}")
 
     x = summary.copy()
-    identity_cols = ["strategy_id", "variant_id", "direction", "rule_id"]
+    identity_cols = _identity_columns(x)
     identities = x[identity_cols].drop_duplicates().itertuples(index=False, name=None)
     rows: list[dict] = []
 
     for key in identities:
-        validation = _split_metric(x, "validation", key, baseline_slippage_bps)
+        validation = _split_metric(x, "validation", identity_cols, key, baseline_slippage_bps)
         if not validation:
             continue
         n = int(_num(validation.get("n"), 0))
         if n < int(min_n):
             continue
 
-        strategy_id, variant_id, direction, rule_id = key
+        identity = dict(zip(identity_cols, key))
         validation_all_slippage = x[
-            x["strategy_id"].eq(strategy_id)
-            & x["variant_id"].eq(variant_id)
-            & x["direction"].eq(direction)
-            & x["rule_id"].eq(rule_id)
-            & x["split"].eq("validation")
+            _identity_mask(x, identity_cols, key) & x["split"].eq("validation")
         ]
         slippage_score, last_profitable_bps = _slippage_component(validation_all_slippage)
 
@@ -134,10 +149,7 @@ def rank_strategies(
         production_eligible = bool(expectancy >= float(production_min_expectancy))
 
         row = {
-            "strategy_id": strategy_id,
-            "variant_id": variant_id,
-            "direction": direction,
-            "rule_id": rule_id,
+            **identity,
             "selection_split": "validation",
             "baseline_slippage_bps": float(baseline_slippage_bps),
             "production_min_expectancy": float(production_min_expectancy),
@@ -156,11 +168,14 @@ def rank_strategies(
             "slippage_component": slippage_score,
             "robustness_score": float(robustness_score),
         }
-        for field in ("stop_pct", "target_pct", "max_hold_minutes", "target_r_multiple", "hold_to_eod"):
+        for field in (
+            "stop_mode", "stop_pct", "target_pct", "max_hold_minutes", "max_hold_sessions",
+            "target_r_multiple", "trailing_exit", "hold_to_eod",
+        ):
             if field in validation:
                 row[field] = validation.get(field)
         for split in ("development", "test", "forward"):
-            metrics = _split_metric(x, split, key, baseline_slippage_bps)
+            metrics = _split_metric(x, split, identity_cols, key, baseline_slippage_bps)
             row[f"{split}_n"] = int(_num(metrics.get("n"), 0)) if metrics else 0
             row[f"{split}_profit_factor"] = _profit_factor_num(metrics.get("profit_factor")) if metrics else np.nan
             row[f"{split}_expectancy"] = _num(metrics.get("expectancy")) if metrics else np.nan

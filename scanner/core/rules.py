@@ -11,6 +11,8 @@ DEFAULT_STOP_PCTS = (0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30)
 SERCLICK_STOP_PCTS = (0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50)
 DEFAULT_TARGET_PCTS = (0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50)
 DEFAULT_R_TARGETS = (1.0, 1.5, 2.0, 3.0, 4.0)
+MERCILESS_R_TARGETS = (0.5, 1.0, 1.5, 2.0, 3.0)
+MERCILESS_HOLD_MINUTES = (5, 10, 15, 30, 45, 60)
 
 
 def common_percentage_rules(
@@ -59,7 +61,19 @@ def structural_r_rules(
     return rules
 
 
+def merciless_rules_for_signal(signal: dict) -> list[ReplayRule]:
+    """Focused structural-risk grid for repeated Merciless-Q scalp entries."""
+    return structural_r_rules(
+        signal,
+        r_targets=MERCILESS_R_TARGETS,
+        hold_minutes=MERCILESS_HOLD_MINUTES,
+        include_eod=True,
+    )
+
+
 def default_rules_for_signal(signal: dict, serclick: bool = False) -> list[ReplayRule]:
+    if str(signal.get("strategy_id") or "").upper() == "MERCILESS_Q":
+        return merciless_rules_for_signal(signal)
     stops = SERCLICK_STOP_PCTS if serclick else DEFAULT_STOP_PCTS
     return common_percentage_rules(stop_pcts=stops) + structural_r_rules(signal)
 

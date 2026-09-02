@@ -58,6 +58,7 @@ jobs:
           tests/test_merciless_q_reentry.py
           tests/test_merciless_q_reporting.py
           tests/test_merciless_q_rules.py
+          tests/test_merciless_q_causality.py
           tests/test_no_cost_merciless_end_to_end.py
 
       - name: Run 60-session SIP research

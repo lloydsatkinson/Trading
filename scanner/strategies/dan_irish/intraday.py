@@ -94,31 +94,33 @@ def generate_dan_intraday_signals(
     x["clv"] = x.apply(close_location_value, axis=1)
     x["impulse_pct"] = pd.to_numeric(x["high"], errors="coerce") / prior_close - 1.0
 
-    impulse_candidates = x.index[x["impulse_pct"] >= cfg.min_reference_extension_pct].tolist()
-    if not impulse_candidates:
-        return pd.DataFrame()
-    impulse_idx = int(impulse_candidates[0])
-    impulse_high = float(x.loc[impulse_idx, "high"])
-    impulse_pct = impulse_high / prior_close - 1.0
-    if impulse_high <= prior_close:
-        return pd.DataFrame()
-
-    checkpoints = retained_gain_checkpoint_values(
-        x,
-        impulse_timestamp=x.loc[impulse_idx, "timestamp_et"],
-        impulse_start_price=prior_close,
-        impulse_high_price=impulse_high,
-    )
-
-    first_confirmation = impulse_idx + int(cfg.min_consolidation_minutes) + 1
+    minimum_base = int(cfg.min_consolidation_minutes)
+    first_confirmation = minimum_base + 1
     for idx in range(first_confirmation, len(x)):
         next_idx = idx + 1
         if next_idx >= len(x):
             continue
         if x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
             continue
+
+        # The impulse peak must be fully known before the minimum base begins.
+        # For a confirmation at idx, only bars through idx-minimum_base-1 can be
+        # the impulse anchor. This allows a continuing initial spike to replace
+        # an earlier threshold-crossing bar without looking at future bars.
+        impulse_window = x.iloc[: idx - minimum_base]
+        if impulse_window.empty:
+            continue
+        impulse_highs = pd.to_numeric(impulse_window["high"], errors="coerce").dropna()
+        if impulse_highs.empty:
+            continue
+        impulse_idx = int(impulse_highs.idxmax())
+        impulse_high = float(x.loc[impulse_idx, "high"])
+        impulse_pct = impulse_high / prior_close - 1.0
+        if impulse_high <= prior_close or impulse_pct < cfg.min_reference_extension_pct:
+            continue
+
         base = x.iloc[impulse_idx + 1:idx]
-        if len(base) < int(cfg.min_consolidation_minutes):
+        if len(base) < minimum_base:
             continue
         base_low = float(pd.to_numeric(base["low"], errors="coerce").min())
         base_high = float(pd.to_numeric(base["high"], errors="coerce").max())
@@ -137,12 +139,18 @@ def generate_dan_intraday_signals(
         if level is None or not np.isfinite(level) or float(row["close"]) <= float(level):
             continue
 
+        checkpoints = retained_gain_checkpoint_values(
+            x,
+            impulse_timestamp=x.loc[impulse_idx, "timestamp_et"],
+            impulse_start_price=prior_close,
+            impulse_high_price=impulse_high,
+        )
         entry = x.loc[next_idx]
         raw_entry = float(entry["open"])
         cap = _number(context.get("market_cap"))
         float_shares = _number(context.get("float_shares"))
         setup_id = dan_intraday_setup_id(
-            int(cfg.min_consolidation_minutes), reference_type, cfg.min_breakout_volume_ratio
+            minimum_base, reference_type, cfg.min_breakout_volume_ratio
         )
         setup_metadata = {
             "setup_id": setup_id,

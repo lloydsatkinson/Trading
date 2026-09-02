@@ -61,6 +61,41 @@ def no_impulse_fixture():
     ])
 
 
+def flat_top_fixture():
+    return bars([
+        ("2026-08-28 09:30", 4.45, 4.58, 4.42, 4.54, 120, 4.50),
+        ("2026-08-28 09:31", 4.54, 4.92, 4.52, 4.88, 360, 4.75),
+        ("2026-08-28 09:32", 4.86, 4.94, 4.78, 4.90, 150, 4.87),
+        ("2026-08-28 09:33", 4.88, 4.93, 4.80, 4.89, 120, 4.87),
+        ("2026-08-28 09:34", 4.87, 4.94, 4.82, 4.91, 110, 4.89),
+        ("2026-08-28 09:35", 4.91, 5.02, 4.90, 5.00, 300, 4.97),
+        ("2026-08-28 09:36", 5.01, 5.15, 4.99, 5.10, 230, 5.07),
+    ])
+
+
+def vwap_reset_fixture():
+    return bars([
+        ("2026-08-28 09:30", 4.45, 4.56, 4.42, 4.52, 120, 4.50),
+        ("2026-08-28 09:31", 4.52, 5.00, 4.50, 4.95, 420, 4.78),
+        ("2026-08-28 09:32", 4.94, 4.96, 4.72, 4.78, 180, 4.82),
+        ("2026-08-28 09:33", 4.78, 4.82, 4.61, 4.66, 130, 4.73),
+        ("2026-08-28 09:34", 4.66, 4.84, 4.64, 4.82, 270, 4.77),
+        ("2026-08-28 09:35", 4.83, 4.98, 4.81, 4.94, 220, 4.91),
+    ])
+
+
+def trap_fixture():
+    return bars([
+        ("2026-08-28 09:30", 4.45, 4.58, 4.42, 4.54, 120, 4.50),
+        ("2026-08-28 09:31", 4.54, 5.00, 4.52, 4.94, 400, 4.78),
+        ("2026-08-28 09:32", 4.92, 4.95, 4.74, 4.80, 170, 4.84),
+        ("2026-08-28 09:33", 4.79, 4.84, 4.68, 4.73, 130, 4.76),
+        ("2026-08-28 09:34", 4.72, 4.74, 4.55, 4.63, 260, 4.65),
+        ("2026-08-28 09:35", 4.62, 4.83, 4.60, 4.81, 330, 4.75),
+        ("2026-08-28 09:36", 4.82, 4.96, 4.80, 4.92, 210, 4.89),
+    ])
+
+
 def test_merciless_requires_minimum_impulse():
     out = generate_merciless_signals(
         no_impulse_fixture(),
@@ -101,3 +136,48 @@ def test_first_pullback_rejects_excessive_upper_wick_on_trigger():
         MercilessConfig(min_impulse_pct=0.15, max_upper_wick_ratio=0.40),
     )
     assert out.empty or out[out["variant_id"].eq("MMQ_FIRST_PULLBACK")].empty
+
+
+def test_micro_breakout_requires_repeated_resistance_tests():
+    out = generate_merciless_signals(
+        flat_top_fixture(), context(), MercilessConfig(min_impulse_pct=0.15)
+    )
+    row = out[out["variant_id"].eq("MMQ_MICRO_BREAKOUT")].iloc[0]
+    assert row["setup_metadata"]["resistance_tests"] >= 2
+    assert str(row["signal_timestamp"])[11:16] == "09:35"
+    assert str(row["entry_timestamp"])[11:16] == "09:36"
+
+
+def test_micro_breakout_rejects_wicky_breakout():
+    fixture = flat_top_fixture().copy()
+    fixture.loc[5, ["high", "close"]] = [5.18, 4.96]
+    out = generate_merciless_signals(
+        fixture,
+        context(),
+        MercilessConfig(min_impulse_pct=0.15, max_upper_wick_ratio=0.40),
+    )
+    assert out.empty or out[out["variant_id"].eq("MMQ_MICRO_BREAKOUT")].empty
+
+
+def test_vwap_reset_requires_touch_then_completed_reclaim():
+    out = generate_merciless_signals(
+        vwap_reset_fixture(),
+        context(),
+        MercilessConfig(min_impulse_pct=0.15, min_breakout_volume_ratio=1.20),
+    )
+    row = out[out["variant_id"].eq("MMQ_VWAP_RESET")].iloc[0]
+    assert str(row["signal_timestamp"])[11:16] == "09:34"
+    assert str(row["entry_timestamp"])[11:16] == "09:35"
+    assert row["setup_metadata"]["vwap_touch_timestamp"] is not None
+
+
+def test_trap_reclaim_requires_failed_downside_break_and_reclaim():
+    out = generate_merciless_signals(
+        trap_fixture(),
+        context(),
+        MercilessConfig(min_impulse_pct=0.15, min_breakout_volume_ratio=1.20),
+    )
+    row = out[out["variant_id"].eq("MMQ_TRAP_RECLAIM")].iloc[0]
+    assert str(row["signal_timestamp"])[11:16] == "09:35"
+    assert str(row["entry_timestamp"])[11:16] == "09:36"
+    assert row["stop_reference"] == 4.55

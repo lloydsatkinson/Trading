@@ -1,0 +1,42 @@
+name: Dan Physical Replay Dedupe Focused
+
+on:
+  push:
+    branches:
+      - dan-irish-research-v1
+    paths:
+      - .github/workflows/dan-physical-replay-dedup-focused.yml
+
+permissions:
+  contents: write
+
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dan-irish-research-v1
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Apply physical replay dedupe patch
+        run: python .github/scripts/dan_physical_replay_dedup_patch.py
+      - name: Verify focused replay dedupe contract
+        run: pytest -q tests/test_dan_physical_replay_dedup.py tests/test_dan_research_performance.py tests/test_dan_intraday_impulse_peak.py
+      - name: Commit production replay dedupe if changed
+        shell: bash
+        run: |
+          if git diff --quiet -- scripts/run_strategy_research.py; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/run_strategy_research.py
+          git commit -m "perf: replay identical Dan physical entries once"
+          git push origin HEAD:dan-irish-research-v1

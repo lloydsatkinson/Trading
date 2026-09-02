@@ -1,7 +1,7 @@
 import pandas as pd
 
 import scripts.run_strategy_research as runner
-from scanner.core.replay import ReplayRule
+from scanner.core.replay import ReplayRule, replay_signal_grid as raw_replay_signal_grid
 
 
 def _bars():
@@ -87,4 +87,88 @@ def test_identical_dan_physical_entry_replays_once_and_fans_out_setup_ids(monkey
         "C10_BASE_HIGH_V1P0",
         "C20_BASE_HIGH_V1P0",
     }
+    assert len(out) == 2
+
+
+def test_deduped_dan_results_match_independent_replays(monkeypatch, tmp_path):
+    bars = _bars()
+    signals = _signals()
+    rule = ReplayRule(stop_pct=0.10, target_pct=0.20, max_hold_minutes=5)
+    peak = {"peak_return_pct": 0.12, "minutes_to_peak": 1.0}
+
+    monkeypatch.setattr(runner, "_load_minute_bars", lambda *args, **kwargs: bars.copy())
+    monkeypatch.setattr(runner, "default_rules_for_signal", lambda signal, serclick=False: [rule])
+    monkeypatch.setattr(runner, "analyze_same_session_peak", lambda *args, **kwargs: pd.Series(peak))
+
+    deduped, skips = runner.replay_signals(tmp_path, "sip", signals, slippage_bps=(25,))
+    assert skips.empty
+
+    independent = []
+    for signal in signals.to_dict("records"):
+        priced = runner.reprice_signal_for_slippage(signal, 25.0)
+        replay = raw_replay_signal_grid(bars, priced, [rule], session_end="16:00")
+        replay["rule_id"] = [runner.rule_family_id(rule)]
+        replay["slippage_bps"] = 25.0
+        for key, value in peak.items():
+            replay[key] = value
+        independent.append(replay)
+    independent = pd.concat(independent, ignore_index=True)
+
+    compare_columns = [
+        "setup_id",
+        "rule_id",
+        "slippage_bps",
+        "entry_price_slipped",
+        "exit_reason",
+        "exit_timestamp",
+        "exit_price",
+        "return_pct",
+        "bars_held",
+        "mfe_pct",
+        "mae_pct",
+        "r_multiple",
+        "peak_return_pct",
+        "minutes_to_peak",
+    ]
+    left = deduped[compare_columns].sort_values(["setup_id", "rule_id"]).reset_index(drop=True)
+    right = independent[compare_columns].sort_values(["setup_id", "rule_id"]).reset_index(drop=True)
+    pd.testing.assert_frame_equal(left, right, check_dtype=False)
+
+
+def test_dan_replay_dedupe_keeps_different_physical_stops_separate(monkeypatch, tmp_path):
+    replay_calls = []
+    signals = _signals()
+    signals.loc[signals.index[1], "stop_reference"] = 4.70
+
+    monkeypatch.setattr(runner, "_load_minute_bars", lambda *args, **kwargs: _bars())
+    monkeypatch.setattr(
+        runner,
+        "default_rules_for_signal",
+        lambda signal, serclick=False: [ReplayRule(stop_pct=0.10, target_pct=0.20, max_hold_minutes=5)],
+    )
+    monkeypatch.setattr(
+        runner,
+        "analyze_same_session_peak",
+        lambda *args, **kwargs: pd.Series({"peak_return_pct": 0.12, "minutes_to_peak": 1.0}),
+    )
+
+    def fake_replay(symbol_bars, priced, rules, session_end="16:00"):
+        replay_calls.append(float(priced["stop_reference"]))
+        return pd.DataFrame([{
+            **priced,
+            "exit_reason": "TIME",
+            "exit_timestamp": priced["entry_timestamp"],
+            "exit_price": float(priced["entry_price_slipped"]),
+            "return_pct": 0.0,
+            "bars_held": 1,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+            "r_multiple": 0.0,
+        }])
+
+    monkeypatch.setattr(runner, "replay_signal_grid", fake_replay)
+    out, skips = runner.replay_signals(tmp_path, "sip", signals, slippage_bps=(25,))
+
+    assert skips.empty
+    assert sorted(replay_calls) == [4.70, 4.80]
     assert len(out) == 2

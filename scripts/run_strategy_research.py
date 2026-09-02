@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
@@ -20,6 +20,8 @@ from scanner.multistrategy.study import MultiStrategyStudy
 from scanner.portfolio.strategy_ranker import rank_strategies
 from scanner.serclick.marketcap import enrich_market_caps_from_history
 from scanner.serclick.study import SerClickStudy
+from scanner.strategies.merciless_q.reporting import friction_break_even, summarize_sequence_edge
+from scanner.strategies.merciless_q.strategy import generate_merciless_signals
 from scanner.strategies.orb_stocks_in_play.strategy import generate_orb_signals
 from scanner.strategies.serclick_leo.strategy import adapt_serclick_ignitions
 from scanner.strategies.vwap_momentum.strategy import generate_vwap_signals
@@ -41,6 +43,8 @@ class ResearchResult:
     peak_timing: pd.DataFrame
     best_hold_times: pd.DataFrame
     skips: pd.DataFrame
+    sequence_edge: pd.DataFrame = field(default_factory=pd.DataFrame)
+    friction_break_even: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def read_csv(path: str | Path) -> pd.DataFrame:
@@ -130,7 +134,7 @@ def generate_price_volume_signals(
     root: str | Path,
     feed: str,
     contexts: pd.DataFrame,
-    strategies: Iterable[str] = ("orb", "vwap"),
+    strategies: Iterable[str] = ("orb", "vwap", "merciless"),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     root = Path(root)
     selected = {str(s).lower() for s in strategies}
@@ -139,6 +143,8 @@ def generate_price_volume_signals(
         generators.append(("orb", generate_orb_signals))
     if "vwap" in selected:
         generators.append(("vwap", generate_vwap_signals))
+    if "merciless" in selected:
+        generators.append(("merciless", generate_merciless_signals))
     if contexts.empty or not generators:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -284,7 +290,7 @@ def render_news(meta: dict, signals: pd.DataFrame, leaderboard: pd.DataFrame, pe
         "",
         f"Run: `{meta['run_id']}` | {meta.get('start_date')} to {meta.get('end_date')} | feed {meta.get('feed')}",
         "",
-        "Strategies: ORB Stocks-in-Play, High-RVOL VWAP Momentum/Reclaim, SerClick/Leo.",
+        "Strategies: ORB Stocks-in-Play, High-RVOL VWAP Momentum/Reclaim, Merciless-Q, SerClick/Leo.",
         "",
         "Execution stress: **10, 25, 50, 75, 100 bps** adverse entry slippage; next-bar entries only.",
         "",
@@ -319,7 +325,7 @@ def run_research(
     feed: str = "sip",
     sessions: int = 60,
     end_date: str | None = None,
-    strategies: Iterable[str] = ("orb", "vwap", "serclick"),
+    strategies: Iterable[str] = ("orb", "vwap", "merciless", "serclick"),
     min_n: int = 20,
 ) -> ResearchResult:
     root = Path(root)
@@ -332,7 +338,7 @@ def run_research(
     skip_frames: list[pd.DataFrame] = []
     meta_parts: list[dict] = []
 
-    if selected & {"orb", "vwap"}:
+    if selected & {"orb", "vwap", "merciless"}:
         study = MultiStrategyStudy(root=root, feed=feed, sessions=sessions, end_date=end_date)
         study_meta = study.run()
         meta_parts.append({k: v for k, v in study_meta.items() if k not in {"candidate_contexts"}})
@@ -340,7 +346,7 @@ def run_research(
             root,
             feed,
             study_meta["candidate_contexts"],
-            strategies=tuple(selected & {"orb", "vwap"}),
+            strategies=tuple(sorted(selected & {"orb", "vwap", "merciless"})),
         )
         if not pv_signals.empty:
             signal_frames.append(pv_signals)
@@ -366,6 +372,8 @@ def run_research(
     market_cap_summary = summarize_strategy_replays(replays, segment_cols=("market_cap_bucket",)) if not replays.empty else pd.DataFrame()
     slippage_summary = build_slippage_summary(summary)
     peak_timing = summarize_peak_timing(replays)
+    sequence_edge = summarize_sequence_edge(replays)
+    merciless_friction = friction_break_even(replays)
 
     ranking_source = summary.copy()
     if not ranking_source.empty and "variant_id" in ranking_source.columns:
@@ -384,6 +392,8 @@ def run_research(
         "end_date": max(end_dates) if end_dates else end_date,
         "signal_rows": int(len(signals)),
         "replay_rows": int(len(replays)),
+        "merciless_sequence_rows": int(len(sequence_edge)),
+        "merciless_friction_rows": int(len(merciless_friction)),
         "selection": "VALIDATION_25BPS_ONLY",
         "serclick_historical_lock_end": str(SERCLICK_BASELINE_END),
         "serclick_forward_start": "2026-08-28",
@@ -398,6 +408,8 @@ def run_research(
     slippage_summary.to_csv(output_dir / "slippage_summary.csv", index=False)
     peak_timing.to_csv(output_dir / "peak_timing.csv", index=False)
     best_hold_times.to_csv(output_dir / "best_hold_times.csv", index=False)
+    sequence_edge.to_csv(output_dir / "merciless_sequence_edge.csv", index=False)
+    merciless_friction.to_csv(output_dir / "merciless_friction_break_even.csv", index=False)
     skips.to_csv(output_dir / "skips.csv", index=False)
     (output_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
     news = render_news(meta, signals, leaderboard, peak_timing)
@@ -409,6 +421,8 @@ def run_research(
     best_hold_times.to_csv(latest / "multistrategy_best_hold_times.csv", index=False)
     peak_timing.to_csv(latest / "multistrategy_peak_timing.csv", index=False)
     signals.to_csv(latest / "multistrategy_signals.csv", index=False)
+    sequence_edge.to_csv(latest / "merciless_sequence_edge.csv", index=False)
+    merciless_friction.to_csv(latest / "merciless_friction_break_even.csv", index=False)
     (latest / "multistrategy_news.md").write_text(news, encoding="utf-8")
     (latest / "multistrategy_run_meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
 
@@ -423,14 +437,16 @@ def run_research(
         peak_timing=peak_timing,
         best_hold_times=best_hold_times,
         skips=skips,
+        sequence_edge=sequence_edge,
+        friction_break_even=merciless_friction,
     )
 
 
 def _parse_strategies(value: str) -> tuple[str, ...]:
     if value.lower() == "all":
-        return ("orb", "vwap", "serclick")
+        return ("orb", "vwap", "merciless", "serclick")
     parts = tuple(part.strip().lower() for part in value.split(",") if part.strip())
-    invalid = set(parts) - {"orb", "vwap", "serclick"}
+    invalid = set(parts) - {"orb", "vwap", "merciless", "serclick"}
     if invalid:
         raise ValueError(f"Unknown strategies: {sorted(invalid)}")
     return parts
@@ -438,7 +454,7 @@ def _parse_strategies(value: str) -> tuple[str, ...]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--strategy", default="all", help="all or comma-separated orb,vwap,serclick")
+    parser.add_argument("--strategy", default="all", help="all or comma-separated orb,vwap,merciless,serclick")
     parser.add_argument("--feed", default="sip", choices=["sip", "iex"])
     parser.add_argument("--sessions", type=int, default=60)
     parser.add_argument("--end-date", default=None)
@@ -458,6 +474,8 @@ def main() -> None:
         "signals": len(result.signals),
         "replays": len(result.replays),
         "leaderboard_rows": len(result.leaderboard),
+        "merciless_sequence_rows": len(result.sequence_edge),
+        "merciless_friction_rows": len(result.friction_break_even),
     }))
 
 

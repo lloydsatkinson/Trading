@@ -2,6 +2,7 @@ from datetime import date
 
 import pandas as pd
 
+import scanner.strategies.dan_irish.intraday as intraday_module
 import scanner.strategies.dan_irish.research as research
 import scanner.strategies.dan_irish.swing as swing_module
 from scanner.strategies.dan_irish.config import DanConfig
@@ -21,6 +22,24 @@ def _daily_fixture():
                 "volume": 1000,
                 "vwap": 5.0,
             })
+    return pd.DataFrame(rows)
+
+
+def _intraday_fixture():
+    rows = []
+    prices = [4.40, 4.75, 5.00, 5.20, 5.05, 4.98, 4.95, 4.96, 4.98, 5.00, 5.03, 5.08, 5.22, 5.25]
+    for idx, close in enumerate(prices):
+        ts = pd.Timestamp("2026-08-28 09:30", tz="America/New_York") + pd.Timedelta(minutes=idx)
+        rows.append({
+            "symbol": "AAA",
+            "timestamp": ts.tz_convert("UTC"),
+            "open": close - 0.02,
+            "high": close + 0.05,
+            "low": close - 0.05,
+            "close": close,
+            "volume": 1000 if idx < 12 else 3000,
+            "vwap": close,
+        })
     return pd.DataFrame(rows)
 
 
@@ -143,3 +162,43 @@ def test_swing_daily_frame_reuses_prepared_symbol_frame(monkeypatch):
 
     assert not out.empty
     assert set(out["symbol"].astype(str)) == {"AAA"}
+
+
+def test_intraday_grid_prepares_session_features_once(monkeypatch):
+    regular_calls = 0
+    median_calls = 0
+    original_regular = intraday_module._regular_session
+    original_median = intraday_module.rolling_prior_volume_median
+
+    def counted_regular(frame):
+        nonlocal regular_calls
+        regular_calls += 1
+        return original_regular(frame)
+
+    def counted_median(frame, lookback):
+        nonlocal median_calls
+        median_calls += 1
+        return original_median(frame, lookback)
+
+    monkeypatch.setattr(intraday_module, "_regular_session", counted_regular)
+    monkeypatch.setattr(intraday_module, "rolling_prior_volume_median", counted_median)
+
+    context = {
+        "symbol": "AAA",
+        "date": "2026-08-28",
+        "prior_close": 4.0,
+        "dan_candidate": True,
+        "pm_high": 5.10,
+        "split": "validation",
+    }
+    intraday_module.generate_dan_intraday_signal_grid(
+        _intraday_fixture(),
+        context,
+        DanConfig(min_reference_extension_pct=0.15, min_retained_gain=0.40),
+        consolidation_minutes=(3, 5),
+        breakout_references=("BASE_HIGH", "HOD"),
+        volume_ratios=(1.0, 1.5),
+    )
+
+    assert regular_calls == 1
+    assert median_calls == 1

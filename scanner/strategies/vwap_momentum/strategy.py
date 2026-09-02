@@ -15,7 +15,12 @@ from scanner.core.features import (
     close_location_value,
     rolling_prior_volume_median,
 )
-from scanner.core.models import SignalRecord, market_cap_bucket, market_cap_in_primary_universe
+from scanner.core.models import (
+    SignalRecord,
+    TriggerDecision,
+    market_cap_bucket,
+    market_cap_in_primary_universe,
+)
 from scanner.core.replay import apply_entry_slippage
 from .config import VWAPConfig
 
@@ -88,18 +93,19 @@ def _signal(
     return record
 
 
-def generate_vwap_signals(
+def detect_vwap_triggers(
     bars: pd.DataFrame,
     context: dict[str, Any],
     cfg: VWAPConfig | None = None,
-) -> pd.DataFrame:
+) -> list[TriggerDecision]:
+    """Detect VWAP momentum triggers from the supplied completed-bar prefix only."""
     cfg = cfg or VWAPConfig()
     if bars.empty or not _candidate_ok(context, cfg):
-        return pd.DataFrame()
+        return []
     prior_close = float(context["prior_close"])
     x = attach_session_vwap(bars)
     if x.empty:
-        return pd.DataFrame()
+        return []
     x["prior_volume_median"] = rolling_prior_volume_median(x, cfg.volume_lookback_bars)
     x["volume_ratio"] = pd.to_numeric(x["volume"], errors="coerce") / x["prior_volume_median"].replace(0, np.nan)
     x["clv"] = x.apply(close_location_value, axis=1)
@@ -108,9 +114,9 @@ def generate_vwap_signals(
 
     impulse_candidates = x.index[x["impulse_pct"] >= cfg.min_impulse_pct].tolist()
     if not impulse_candidates:
-        return pd.DataFrame()
+        return []
     impulse_idx = impulse_candidates[0]
-    rows: list[dict[str, Any]] = []
+    decisions: list[TriggerDecision] = []
 
     touch_idx = None
     peak_price = float(x.loc[:impulse_idx, "high"].max())
@@ -133,11 +139,7 @@ def generate_vwap_signals(
             for idx in x.index:
                 if idx <= touch_idx:
                     continue
-                next_idx = idx + 1
-                if next_idx not in x.index or x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
-                    continue
                 row = x.loc[idx]
-                entry = x.loc[next_idx]
                 vwap = _number(row["session_vwap"])
                 ratio = _number(row["volume_ratio"])
                 if vwap is None or ratio is None:
@@ -150,10 +152,24 @@ def generate_vwap_signals(
                     structural_low = float(x.loc[impulse_idx:idx, "low"].min())
                     vwap_5_back = _number(x.loc[max(0, idx - 5), "session_vwap"])
                     rising_vwap = bool(vwap_5_back is not None and vwap > vwap_5_back)
-                    rows.append(_signal(
-                        context, "VWAP_LONG_RECLAIM", "LONG", row, entry, structural_low, cfg,
-                        {"impulse_pct": float(x.loc[impulse_idx:idx, "impulse_pct"].max()), "peak_price": peak_price, "retained_gain": retained_gain, "touch_timestamp": x.loc[touch_idx, "timestamp_et"], "volume_ratio": ratio, "clv": float(row["clv"]), "rising_vwap": rising_vwap},
-                    ))
+                    decisions.append(
+                        TriggerDecision(
+                            variant_id="VWAP_LONG_RECLAIM",
+                            direction="LONG",
+                            signal_timestamp=row["timestamp_et"],
+                            reference_price=float(row["close"]),
+                            stop_reference=structural_low,
+                            setup_metadata={
+                                "impulse_pct": float(x.loc[impulse_idx:idx, "impulse_pct"].max()),
+                                "peak_price": peak_price,
+                                "retained_gain": retained_gain,
+                                "touch_timestamp": x.loc[touch_idx, "timestamp_et"],
+                                "volume_ratio": ratio,
+                                "clv": float(row["clv"]),
+                                "rising_vwap": rising_vwap,
+                            },
+                        )
+                    )
                     break
 
     loss_idx = None
@@ -182,11 +198,7 @@ def generate_vwap_signals(
             for idx in x.index:
                 if idx <= rejection_idx:
                     continue
-                next_idx = idx + 1
-                if next_idx not in x.index or x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
-                    continue
                 row = x.loc[idx]
-                entry = x.loc[next_idx]
                 ratio = _number(row["volume_ratio"])
                 vwap = _number(row["session_vwap"])
                 if ratio is None or vwap is None:
@@ -198,10 +210,57 @@ def generate_vwap_signals(
                     and ratio >= cfg.min_reclaim_volume_ratio
                     and float(row["clv"]) <= (1.0 - cfg.min_clv)
                 ):
-                    rows.append(_signal(
-                        context, "VWAP_SHORT_REJECTION", "SHORT", row, entry, rejection_high, cfg,
-                        {"impulse_pct": float(x.loc[impulse_idx:rejection_idx, "impulse_pct"].max()), "vwap_loss_timestamp": x.loc[loss_idx, "timestamp_et"], "rejection_timestamp": x.loc[rejection_idx, "timestamp_et"], "volume_ratio": ratio, "clv": float(row["clv"])},
-                    ))
+                    decisions.append(
+                        TriggerDecision(
+                            variant_id="VWAP_SHORT_REJECTION",
+                            direction="SHORT",
+                            signal_timestamp=row["timestamp_et"],
+                            reference_price=float(row["close"]),
+                            stop_reference=rejection_high,
+                            setup_metadata={
+                                "impulse_pct": float(x.loc[impulse_idx:rejection_idx, "impulse_pct"].max()),
+                                "vwap_loss_timestamp": x.loc[loss_idx, "timestamp_et"],
+                                "rejection_timestamp": x.loc[rejection_idx, "timestamp_et"],
+                                "volume_ratio": ratio,
+                                "clv": float(row["clv"]),
+                            },
+                        )
+                    )
                     break
 
+    return decisions
+
+
+def generate_vwap_signals(
+    bars: pd.DataFrame,
+    context: dict[str, Any],
+    cfg: VWAPConfig | None = None,
+) -> pd.DataFrame:
+    cfg = cfg or VWAPConfig()
+    decisions = detect_vwap_triggers(bars, context, cfg)
+    if not decisions:
+        return pd.DataFrame()
+
+    x = attach_session_vwap(bars)
+    rows: list[dict[str, Any]] = []
+    for decision in decisions:
+        matches = x.index[x["timestamp_et"].eq(pd.Timestamp(decision.signal_timestamp))].tolist()
+        if not matches:
+            continue
+        idx = matches[0]
+        next_idx = idx + 1
+        if next_idx not in x.index or x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
+            continue
+        rows.append(
+            _signal(
+                context,
+                decision.variant_id,
+                decision.direction,
+                x.loc[idx],
+                x.loc[next_idx],
+                float(decision.stop_reference),
+                cfg,
+                decision.setup_metadata,
+            )
+        )
     return pd.DataFrame(rows)

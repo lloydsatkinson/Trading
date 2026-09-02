@@ -51,6 +51,17 @@ def _regular_session(bars: pd.DataFrame) -> pd.DataFrame:
     return x[(clock >= pd.Timestamp("09:30").time()) & (clock < pd.Timestamp("16:00").time())].reset_index(drop=True)
 
 
+def _prepare_intraday_features(bars: pd.DataFrame, cfg: DanConfig) -> pd.DataFrame:
+    x = _regular_session(bars)
+    if x.empty:
+        return x
+    x = x.copy()
+    x["prior_volume_median"] = rolling_prior_volume_median(x, cfg.volume_lookback_bars)
+    x["volume_ratio"] = pd.to_numeric(x["volume"], errors="coerce") / x["prior_volume_median"].replace(0, np.nan)
+    x["clv"] = x.apply(close_location_value, axis=1)
+    return x
+
+
 def _breakout_level(
     x: pd.DataFrame,
     idx: int,
@@ -75,6 +86,8 @@ def generate_dan_intraday_signals(
     context: dict[str, Any],
     cfg: DanConfig | None = None,
     breakout_reference: str = "BASE_HIGH",
+    *,
+    _prepared_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     cfg = cfg or DanConfig()
     reference_type = str(breakout_reference).upper()
@@ -86,13 +99,9 @@ def generate_dan_intraday_signals(
     if prior_close is None or prior_close <= 0:
         return pd.DataFrame()
 
-    x = _regular_session(bars)
+    x = _prepared_frame.copy() if _prepared_frame is not None else _prepare_intraday_features(bars, cfg)
     if x.empty:
         return pd.DataFrame()
-    x["prior_volume_median"] = rolling_prior_volume_median(x, cfg.volume_lookback_bars)
-    x["volume_ratio"] = pd.to_numeric(x["volume"], errors="coerce") / x["prior_volume_median"].replace(0, np.nan)
-    x["clv"] = x.apply(close_location_value, axis=1)
-    x["impulse_pct"] = pd.to_numeric(x["high"], errors="coerce") / prior_close - 1.0
 
     minimum_base = int(cfg.min_consolidation_minutes)
     first_confirmation = minimum_base + 1
@@ -224,6 +233,9 @@ def generate_dan_intraday_signal_grid(
 ) -> pd.DataFrame:
     """Generate distinct entry-timing hypotheses without pooling setup identities."""
     cfg = cfg or DanConfig()
+    prepared = _prepare_intraday_features(bars, cfg)
+    if prepared.empty:
+        return pd.DataFrame()
     frames: list[pd.DataFrame] = []
     for minutes in consolidation_minutes:
         for reference in breakout_references:
@@ -238,6 +250,7 @@ def generate_dan_intraday_signal_grid(
                     context,
                     combo,
                     breakout_reference=str(reference),
+                    _prepared_frame=prepared,
                 )
                 if not signal.empty:
                     frames.append(signal)

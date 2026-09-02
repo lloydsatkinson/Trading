@@ -17,7 +17,7 @@ def _number(value: Any) -> float | None:
     return number if isfinite(number) else None
 
 
-def _variant(population: str, window: str) -> str:
+def serclick_variant(population: str, window: str) -> str:
     if window == "09:30-10:30":
         return "MORNING_OBSERVATION"
     if population == "BOTH" and window == "10:30-15:00":
@@ -25,6 +25,10 @@ def _variant(population: str, window: str) -> str:
     if population == "BOTH" and window == "16:00-20:00":
         return "LEO_BOTH_AH"
     return "SERCLICK_CONTROL"
+
+
+# Preserve the prior private name for internal/backward compatibility.
+_variant = serclick_variant
 
 
 def adapt_serclick_ignitions(ignitions: pd.DataFrame) -> pd.DataFrame:
@@ -53,7 +57,7 @@ def adapt_serclick_ignitions(ignitions: pd.DataFrame) -> pd.DataFrame:
             reference_price = raw_entry
         record = SignalRecord(
             strategy_id="SERCLICK_LEO",
-            variant_id=_variant(population, window),
+            variant_id=serclick_variant(population, window),
             symbol=str(base.get("symbol") or "UNKNOWN"),
             date=str(base.get("date") or "UNKNOWN"),
             direction="LONG",

@@ -125,6 +125,25 @@ class LiveSignalEvent:
     source_timestamp: datetime
 
 
+@dataclass(frozen=True)
+class ConsensusSnapshot:
+    symbol: str
+    direction: Direction
+    active_families: int
+    production_families: int
+    weighted_score: float
+    supporting_families: tuple[str, ...]
+    conflict: bool
+    confidence_label: str
+
+
+@dataclass(frozen=True)
+class RankedOpportunity:
+    event: LiveSignalEvent
+    score: float
+    consensus: ConsensusSnapshot
+
+
 def stable_signal_id(
     strategy_id: str,
     variant_id: str,

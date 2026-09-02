@@ -13,3 +13,4 @@ Draft PR: #16
 ## Task status
 
 - Task 1: complete — tests first at `d454724`; RED CI run 33649471370 failed exactly with `ModuleNotFoundError: scanner.live`; implementation/fix ended at `564c9cc`; GREEN CI run 33650008837 passed the full suite and compile; task-scoped diff contained only `scanner/live/{__init__,models,clock,feed_health}.py`; review clean.
+- Task 2: complete — tests first at `87e3ba2`; RED CI run 33650403340 failed exactly with missing `scanner.live.feature_engine`; implementation reached green at `62877a2`; review found private `_bars` coupling and refactored to the public `bars_frame()` API at `8c30297`; GREEN review run 33650815337 passed the full suite and compile; review clean.

@@ -1,0 +1,66 @@
+name: Dan Runtime Benchmark Fast
+
+on:
+  push:
+    branches:
+      - dan-irish-benchmark-fast-20260902
+    paths:
+      - .github/workflows/dan-runtime-benchmark-fast.yml
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      APCA_API_BASE_URL: https://paper-api.alpaca.markets
+      PYTHONPATH: .
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout optimized benchmark branch
+        uses: actions/checkout@v4
+        with:
+          ref: dan-irish-benchmark-fast-20260902
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Restore Dan market-data cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache/multistrategy_alpaca
+          key: dan-benchmark-fast-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            dan-60d-${{ runner.os }}-
+            dan-benchmark-${{ runner.os }}-
+            multistrategy-${{ runner.os }}-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Verify benchmark imports
+        run: python -m py_compile .github/scripts/dan_runtime_benchmark.py
+      - name: Run real SIP benchmark
+        run: python .github/scripts/dan_runtime_benchmark.py
+      - name: Publish benchmark summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f data/benchmark/dan-runtime/benchmark.json ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat data/benchmark/dan-runtime/benchmark.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Benchmark did not produce benchmark.json; inspect logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dan-runtime-benchmark-fast-${{ github.run_id }}
+          path: data/benchmark/dan-runtime/
+          if-no-files-found: warn
+          retention-days: 14

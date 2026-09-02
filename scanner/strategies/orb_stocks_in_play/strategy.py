@@ -16,7 +16,12 @@ from scanner.core.features import (
     opening_range,
     rolling_prior_volume_median,
 )
-from scanner.core.models import SignalRecord, market_cap_bucket, market_cap_in_primary_universe
+from scanner.core.models import (
+    SignalRecord,
+    TriggerDecision,
+    market_cap_bucket,
+    market_cap_in_primary_universe,
+)
 from scanner.core.replay import apply_entry_slippage
 from .config import ORBConfig
 
@@ -92,46 +97,59 @@ def _base_signal(
     return record
 
 
-def generate_orb_signals(
+def detect_orb_triggers(
     bars: pd.DataFrame,
     context: dict[str, Any],
     cfg: ORBConfig | None = None,
-) -> pd.DataFrame:
+) -> list[TriggerDecision]:
+    """Detect ORB triggers using only the supplied completed-bar prefix."""
     cfg = cfg or ORBConfig()
     if bars.empty or not _candidate_ok(context, cfg):
-        return pd.DataFrame()
+        return []
 
     x = attach_session_vwap(bars)
     if x.empty:
-        return pd.DataFrame()
+        return []
     locked = opening_range(x, minutes=cfg.opening_range_minutes)
     or_high = _number(locked.get("high"))
     or_low = _number(locked.get("low"))
     if or_high is None or or_low is None:
-        return pd.DataFrame()
+        return []
 
     x["prior_volume_median"] = rolling_prior_volume_median(x, cfg.volume_lookback_bars)
     x["volume_ratio"] = pd.to_numeric(x["volume"], errors="coerce") / x["prior_volume_median"].replace(0, np.nan)
     x["clv"] = x.apply(close_location_value, axis=1)
     post = x[x["timestamp_et"].dt.time >= pd.Timestamp("09:35").time()].copy()
     gap = float(context["pm_gap_pct"])
-    rows: list[dict[str, Any]] = []
+    decisions: list[TriggerDecision] = []
 
     for idx in post.index:
-        next_idx = idx + 1
-        if next_idx not in x.index or x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
-            continue
         row = x.loc[idx]
-        entry = x.loc[next_idx]
         ratio = _number(row["volume_ratio"])
         session_vwap = _number(row["session_vwap"])
         if ratio is None or ratio < cfg.min_breakout_volume_ratio or session_vwap is None:
             continue
-        if gap >= cfg.min_gap_pct and float(row["close"]) > or_high and float(row["close"]) > session_vwap and float(row["clv"]) >= cfg.min_clv:
-            rows.append(_base_signal(
-                context, "ORB_LONG_BREAK", "LONG", row, entry, float(row["low"]), cfg,
-                {"opening_range_high": or_high, "opening_range_low": or_low, "volume_ratio": ratio, "clv": float(row["clv"])},
-            ))
+        if (
+            gap >= cfg.min_gap_pct
+            and float(row["close"]) > or_high
+            and float(row["close"]) > session_vwap
+            and float(row["clv"]) >= cfg.min_clv
+        ):
+            decisions.append(
+                TriggerDecision(
+                    variant_id="ORB_LONG_BREAK",
+                    direction="LONG",
+                    signal_timestamp=row["timestamp_et"],
+                    reference_price=float(row["close"]),
+                    stop_reference=float(row["low"]),
+                    setup_metadata={
+                        "opening_range_high": or_high,
+                        "opening_range_low": or_low,
+                        "volume_ratio": ratio,
+                        "clv": float(row["clv"]),
+                    },
+                )
+            )
             break
 
     if gap >= cfg.min_gap_pct:
@@ -164,15 +182,11 @@ def generate_orb_signals(
                     retest_idx = idx
                     retest_low = float(row["low"])
                     break
-            if retest_idx is not None:
+            if retest_idx is not None and retest_low is not None:
                 for idx in post.index:
                     if idx <= retest_idx:
                         continue
-                    next_idx = idx + 1
-                    if next_idx not in x.index or x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
-                        continue
                     row = x.loc[idx]
-                    entry = x.loc[next_idx]
                     ratio = _number(row["volume_ratio"])
                     session_vwap = _number(row["session_vwap"])
                     if ratio is None or session_vwap is None:
@@ -183,10 +197,23 @@ def generate_orb_signals(
                         and ratio >= cfg.min_breakout_volume_ratio
                         and float(row["clv"]) >= cfg.min_clv
                     ):
-                        rows.append(_base_signal(
-                            context, "ORB_LONG_PULLBACK", "LONG", row, entry, float(retest_low), cfg,
-                            {"opening_range_high": or_high, "opening_range_low": or_low, "volume_ratio": ratio, "clv": float(row["clv"]), "break_timestamp": x.loc[break_idx, "timestamp_et"], "retest_timestamp": x.loc[retest_idx, "timestamp_et"]},
-                        ))
+                        decisions.append(
+                            TriggerDecision(
+                                variant_id="ORB_LONG_PULLBACK",
+                                direction="LONG",
+                                signal_timestamp=row["timestamp_et"],
+                                reference_price=float(row["close"]),
+                                stop_reference=float(retest_low),
+                                setup_metadata={
+                                    "opening_range_high": or_high,
+                                    "opening_range_low": or_low,
+                                    "volume_ratio": ratio,
+                                    "clv": float(row["clv"]),
+                                    "break_timestamp": x.loc[break_idx, "timestamp_et"],
+                                    "retest_timestamp": x.loc[retest_idx, "timestamp_et"],
+                                },
+                            )
+                        )
                         break
 
         failed_high = None
@@ -197,15 +224,11 @@ def generate_orb_signals(
                 failed_idx = idx
                 failed_high = float(row["high"])
                 break
-        if failed_idx is not None:
+        if failed_idx is not None and failed_high is not None:
             for idx in post.index:
                 if idx <= failed_idx:
                     continue
-                next_idx = idx + 1
-                if next_idx not in x.index or x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
-                    continue
                 row = x.loc[idx]
-                entry = x.loc[next_idx]
                 ratio = _number(row["volume_ratio"])
                 session_vwap = _number(row["session_vwap"])
                 if ratio is None or session_vwap is None:
@@ -216,28 +239,87 @@ def generate_orb_signals(
                     and ratio >= cfg.min_breakout_volume_ratio
                     and float(row["clv"]) <= (1.0 - cfg.min_clv)
                 ):
-                    rows.append(_base_signal(
-                        context, "ORB_SHORT_FAILED_GAP", "SHORT", row, entry, float(failed_high), cfg,
-                        {"opening_range_high": or_high, "opening_range_low": or_low, "volume_ratio": ratio, "clv": float(row["clv"]), "failed_attempt_timestamp": x.loc[failed_idx, "timestamp_et"]},
-                    ))
+                    decisions.append(
+                        TriggerDecision(
+                            variant_id="ORB_SHORT_FAILED_GAP",
+                            direction="SHORT",
+                            signal_timestamp=row["timestamp_et"],
+                            reference_price=float(row["close"]),
+                            stop_reference=float(failed_high),
+                            setup_metadata={
+                                "opening_range_high": or_high,
+                                "opening_range_low": or_low,
+                                "volume_ratio": ratio,
+                                "clv": float(row["clv"]),
+                                "failed_attempt_timestamp": x.loc[failed_idx, "timestamp_et"],
+                            },
+                        )
+                    )
                     break
 
     if gap <= -cfg.min_gap_pct:
         for idx in post.index:
-            next_idx = idx + 1
-            if next_idx not in x.index or x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
-                continue
             row = x.loc[idx]
-            entry = x.loc[next_idx]
             ratio = _number(row["volume_ratio"])
             session_vwap = _number(row["session_vwap"])
             if ratio is None or session_vwap is None:
                 continue
-            if ratio >= cfg.min_breakout_volume_ratio and float(row["close"]) < or_low and float(row["close"]) < session_vwap and float(row["clv"]) <= (1.0 - cfg.min_clv):
-                rows.append(_base_signal(
-                    context, "ORB_SHORT_NEGATIVE_GAP", "SHORT", row, entry, float(row["high"]), cfg,
-                    {"opening_range_high": or_high, "opening_range_low": or_low, "volume_ratio": ratio, "clv": float(row["clv"])},
-                ))
+            if (
+                ratio >= cfg.min_breakout_volume_ratio
+                and float(row["close"]) < or_low
+                and float(row["close"]) < session_vwap
+                and float(row["clv"]) <= (1.0 - cfg.min_clv)
+            ):
+                decisions.append(
+                    TriggerDecision(
+                        variant_id="ORB_SHORT_NEGATIVE_GAP",
+                        direction="SHORT",
+                        signal_timestamp=row["timestamp_et"],
+                        reference_price=float(row["close"]),
+                        stop_reference=float(row["high"]),
+                        setup_metadata={
+                            "opening_range_high": or_high,
+                            "opening_range_low": or_low,
+                            "volume_ratio": ratio,
+                            "clv": float(row["clv"]),
+                        },
+                    )
+                )
                 break
 
+    return decisions
+
+
+def generate_orb_signals(
+    bars: pd.DataFrame,
+    context: dict[str, Any],
+    cfg: ORBConfig | None = None,
+) -> pd.DataFrame:
+    cfg = cfg or ORBConfig()
+    decisions = detect_orb_triggers(bars, context, cfg)
+    if not decisions:
+        return pd.DataFrame()
+
+    x = attach_session_vwap(bars)
+    rows: list[dict[str, Any]] = []
+    for decision in decisions:
+        matches = x.index[x["timestamp_et"].eq(pd.Timestamp(decision.signal_timestamp))].tolist()
+        if not matches:
+            continue
+        idx = matches[0]
+        next_idx = idx + 1
+        if next_idx not in x.index or x.loc[next_idx, "session_date"] != x.loc[idx, "session_date"]:
+            continue
+        rows.append(
+            _base_signal(
+                context,
+                decision.variant_id,
+                decision.direction,
+                x.loc[idx],
+                x.loc[next_idx],
+                float(decision.stop_reference),
+                cfg,
+                decision.setup_metadata,
+            )
+        )
     return pd.DataFrame(rows)

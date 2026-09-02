@@ -113,7 +113,20 @@ def generate_dan_signal_set(
     if contexts is None or contexts.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    ensure_dan_followup_caches(study, contexts, daily_bars, cfg)
+    prepared_daily = (
+        daily_bars.copy()
+        if not daily_bars.empty and {"timestamp_et", "session_date"}.issubset(daily_bars.columns)
+        else prepare_intraday_bars(daily_bars)
+    )
+    ensure_dan_followup_caches(study, contexts, prepared_daily, cfg)
+    daily_by_symbol = (
+        {
+            str(symbol): group.copy()
+            for symbol, group in prepared_daily.groupby(prepared_daily["symbol"].astype(str), sort=False)
+        }
+        if not prepared_daily.empty and "symbol" in prepared_daily.columns
+        else {}
+    )
     frames: list[pd.DataFrame] = []
     skips: list[dict] = []
 
@@ -137,7 +150,7 @@ def generate_dan_signal_set(
 
         swing = generate_dan_swing_signals(
             context,
-            daily_bars,
+            daily_by_symbol.get(symbol, pd.DataFrame()),
             load_symbol_minutes,
             cfg,
             session_splits=session_splits,

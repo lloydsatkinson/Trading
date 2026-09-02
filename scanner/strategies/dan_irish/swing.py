@@ -48,7 +48,11 @@ def dan_swing_setup_id(
 def _daily_frame(daily_bars: pd.DataFrame, symbol: str) -> pd.DataFrame:
     if daily_bars.empty:
         return pd.DataFrame()
-    x = prepare_intraday_bars(daily_bars)
+    x = (
+        daily_bars.copy()
+        if {"timestamp_et", "session_date"}.issubset(daily_bars.columns)
+        else prepare_intraday_bars(daily_bars)
+    )
     x = x[x["symbol"].astype(str).eq(str(symbol))].copy()
     if x.empty:
         return x

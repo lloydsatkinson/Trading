@@ -132,13 +132,22 @@ def test_api_free_runner_executes_merciless_and_writes_edge_artifacts(tmp_path, 
     assert set(result.replays["slippage_bps"]) == {10.0, 25.0, 50.0, 75.0, 100.0}
     assert not result.sequence_edge.empty
     assert not result.friction_break_even.empty
+    assert not result.sequence_summary.empty
+    assert not result.friction_thresholds.empty
 
     assert (result.output_dir / "merciless_sequence_edge.csv").exists()
     assert (result.output_dir / "merciless_friction_break_even.csv").exists()
+    assert (result.output_dir / "merciless_sequence_summary.csv").exists()
+    assert (result.output_dir / "merciless_friction_summary.csv").exists()
     latest = tmp_path / "data" / "latest"
     assert (latest / "merciless_sequence_edge.csv").exists()
     assert (latest / "merciless_friction_break_even.csv").exists()
-    assert "MERCILESS_Q" in (latest / "multistrategy_news.md").read_text(encoding="utf-8")
+    assert (latest / "merciless_sequence_summary.csv").exists()
+    assert (latest / "merciless_friction_summary.csv").exists()
+    news = (latest / "multistrategy_news.md").read_text(encoding="utf-8")
+    assert "MERCILESS_Q" in news
+    assert "Merciless repeat-entry edge" in news
+    assert "Merciless friction resilience" in news
 
 
 def test_strategy_parser_accepts_merciless_and_all_includes_it():

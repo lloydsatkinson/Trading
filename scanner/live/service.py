@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 from typing import Any
 
@@ -8,7 +9,14 @@ from .feature_engine import FeatureEngine
 from .feed_health import FeedHealthMonitor
 from .forward_ledger import ForwardLedger
 from .lifecycle import LifecycleEngine
-from .models import FeedHealth, FeatureSnapshot, LiveSignalEvent, MarketBar, RankedOpportunity
+from .models import (
+    FeedHealth,
+    FeatureSnapshot,
+    LifecycleState,
+    LiveSignalEvent,
+    MarketBar,
+    RankedOpportunity,
+)
 from .ranker import rank_active
 from .signal_bus import SignalBus
 from .strategy_registry import StrategyRegistry
@@ -67,6 +75,13 @@ class ScannerService:
             self._latest_events[event.signal_id] = event
             self._latest_by_adapter_symbol[self._event_key(event)] = event
 
+    def seed_bar(self, bar: MarketBar, context: dict[str, Any] | None = None) -> bool:
+        state = self.states.get(bar.symbol)
+        if state.has_timestamp(bar.timestamp):
+            return False
+        state.append_bar(bar)
+        return True
+
     def process_bar(self, bar: MarketBar, context: dict[str, Any]) -> list[LiveSignalEvent]:
         state = self.states.get(bar.symbol)
         state.append_bar(bar)
@@ -87,12 +102,24 @@ class ScannerService:
         self._features_by_symbol[bar.symbol.upper()] = features
 
         emitted: list[LiveSignalEvent] = []
+        symbol_halted = bool(context.get("_symbol_halted", False))
         for adapter in self.registry.adapters:
             key = self._adapter_key(adapter, bar.symbol)
             prior_event = self._latest_by_adapter_symbol.get(key)
             intent = adapter.evaluate(state, features, prior_event)
             if intent is None:
                 continue
+            if (
+                symbol_halted
+                and intent.state is LifecycleState.FIRE
+                and intent.descriptor.production_eligible
+            ):
+                intent = replace(
+                    intent,
+                    state=LifecycleState.HALTED,
+                    reason_codes=tuple((*intent.reason_codes, "SYMBOL_HALTED")),
+                    explanation=f"{intent.explanation}; production FIRE blocked by trading halt",
+                )
             event = self.lifecycle.apply(intent, self.feed_health.state)
             if event is None:
                 continue

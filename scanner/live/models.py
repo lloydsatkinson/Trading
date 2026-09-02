@@ -61,6 +61,36 @@ class MarketBar:
 
 
 @dataclass(frozen=True)
+class MarketQuote:
+    symbol: str
+    timestamp: datetime
+    bid: float
+    ask: float
+    bid_size: float
+    ask_size: float
+
+
+@dataclass(frozen=True)
+class MarketStatus:
+    symbol: str
+    timestamp: datetime
+    halted: bool
+    code: str
+    message: str
+    reason_code: str = ""
+    reason_message: str = ""
+
+
+@dataclass(frozen=True)
+class MarketLuld:
+    symbol: str
+    timestamp: datetime
+    limit_up: float
+    limit_down: float
+    indicator: str = ""
+
+
+@dataclass(frozen=True)
 class FeatureSnapshot:
     symbol: str
     timestamp: datetime

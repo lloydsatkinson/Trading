@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import time
 from math import isfinite
 from typing import Any
 
@@ -20,6 +21,9 @@ from scanner.core.replay import apply_entry_slippage
 from .config import MercilessConfig
 
 Event = tuple[int, str, float, dict[str, Any]]
+REGULAR_SESSION_START = time(9, 30)
+OPENING_RVOL_AVAILABLE = time(9, 35)
+REGULAR_SESSION_END = time(16, 0)
 
 
 def _number(value: Any) -> float | None:
@@ -28,6 +32,19 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if isfinite(number) else None
+
+
+def _clock(value: Any) -> time:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("America/New_York")
+    else:
+        ts = ts.tz_convert("America/New_York")
+    return ts.time()
+
+
+def _opening_rvol_known(signal_timestamp: Any) -> bool:
+    return _clock(signal_timestamp) >= OPENING_RVOL_AVAILABLE
 
 
 def _candidate_ok(context: dict[str, Any], cfg: MercilessConfig) -> bool:
@@ -39,13 +56,24 @@ def _candidate_ok(context: dict[str, Any], cfg: MercilessConfig) -> bool:
         return False
     gap = _number(context.get("pm_gap_pct"))
     turnover = _number(context.get("pm_dollar_turnover"))
-    rvol = _number(context.get("opening_rvol"))
     if gap is None or gap < cfg.min_gap_pct:
         return False
     if turnover is None or turnover < cfg.min_pm_dollar_turnover:
         return False
-    if rvol is not None and rvol < cfg.min_opening_rvol:
+    return True
+
+
+def _event_context_ok(x: pd.DataFrame, idx: int, context: dict[str, Any], cfg: MercilessConfig) -> bool:
+    if idx + 1 >= len(x):
         return False
+    signal_clock = _clock(x.loc[idx, "timestamp_et"])
+    entry_clock = _clock(x.loc[idx + 1, "timestamp_et"])
+    if signal_clock < REGULAR_SESSION_START or entry_clock >= REGULAR_SESSION_END:
+        return False
+    if signal_clock >= OPENING_RVOL_AVAILABLE:
+        rvol = _number(context.get("opening_rvol"))
+        if rvol is not None and rvol < cfg.min_opening_rvol:
+            return False
     return True
 
 
@@ -57,11 +85,11 @@ def _upper_wick_ratio(row: pd.Series) -> float:
     return float(np.clip((high - max(float(row["open"]), float(row["close"]))) / width, 0.0, 1.0))
 
 
-def _score(context: dict[str, Any], cfg: MercilessConfig, setup: dict[str, Any]) -> float:
+def _score(context: dict[str, Any], cfg: MercilessConfig, setup: dict[str, Any], signal_timestamp: Any) -> float:
     score = 0.0
     gap = _number(context.get("pm_gap_pct")) or 0.0
     turnover = _number(context.get("pm_dollar_turnover")) or 0.0
-    rvol = _number(context.get("opening_rvol"))
+    rvol = _number(context.get("opening_rvol")) if _opening_rvol_known(signal_timestamp) else None
     impulse = float(setup.get("impulse_pct", 0.0))
     velocity = float(setup.get("impulse_velocity_pct_per_min", 0.0))
     retained = float(setup.get("retained_gain", 0.0))
@@ -117,6 +145,7 @@ def _signal(context: dict[str, Any], variant_id: str, x: pd.DataFrame, signal_id
     cap = _number(context.get("market_cap"))
     float_shares = _number(context.get("float_shares"))
     raw_entry = float(entry_row["open"])
+    signal_rvol = context.get("opening_rvol") if _opening_rvol_known(signal_row["timestamp_et"]) else np.nan
     record = SignalRecord(
         strategy_id="MERCILESS_Q",
         variant_id=variant_id,
@@ -134,7 +163,7 @@ def _signal(context: dict[str, Any], variant_id: str, x: pd.DataFrame, signal_id
         float_shares=float_shares,
         float_bucket=bucket_float(float_shares),
         gap_bucket=bucket_gap(context.get("pm_gap_pct")),
-        rvol_bucket=bucket_rvol(context.get("opening_rvol")),
+        rvol_bucket=bucket_rvol(signal_rvol),
         time_of_day_bucket=bucket_time_of_day(signal_row["timestamp_et"]),
         catalyst_class=str(context.get("catalyst_class") or "UNKNOWN"),
         borrow_status=str(context.get("borrow_status") or "UNKNOWN"),
@@ -147,8 +176,8 @@ def _signal(context: dict[str, Any], variant_id: str, x: pd.DataFrame, signal_id
         "split": str(context.get("split") or "forward"),
         "pm_gap_pct": context.get("pm_gap_pct"),
         "pm_dollar_turnover": context.get("pm_dollar_turnover"),
-        "opening_rvol": context.get("opening_rvol"),
-        "mmq_score": _score(context, cfg, setup),
+        "opening_rvol": signal_rvol,
+        "mmq_score": _score(context, cfg, setup, signal_row["timestamp_et"]),
         "sequence_number": int(sequence_number),
         "minutes_since_prior_signal": minutes_since,
         "runner_age_minutes": float((pd.Timestamp(signal_row["timestamp_et"]) - pd.Timestamp(x.loc[impulse_idx, "timestamp_et"])).total_seconds() / 60.0),
@@ -317,7 +346,8 @@ def generate_merciless_signals(bars: pd.DataFrame, context: dict[str, Any], cfg:
     events.extend(_micro_breakout_events(x, prior_close, impulse_idx, cfg))
     events.extend(_vwap_reset_events(x, prior_close, impulse_idx, cfg))
     events.extend(_trap_reclaim_events(x, prior_close, impulse_idx, cfg))
-    accepted = _accept_events(events, cfg)
+    causal_events = [event for event in events if _event_context_ok(x, event[0], context, cfg)]
+    accepted = _accept_events(causal_events, cfg)
     rows: list[dict[str, Any]] = []
     prior_idx: int | None = None
     for sequence_number, (idx, variant, stop, setup) in enumerate(accepted, start=1):

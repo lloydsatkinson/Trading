@@ -189,7 +189,8 @@ def _micro_breakout_events(x: pd.DataFrame, prior_close: float, impulse_idx: int
         if len(window) < 3:
             continue
         resistance = float(window["high"].max())
-        tests = int((pd.to_numeric(window["high"], errors="coerce") >= resistance * 0.995).sum())
+        recent = window.tail(3)
+        tests = int((pd.to_numeric(recent["high"], errors="coerce") >= resistance * 0.995).sum())
         if tests < 2:
             continue
         low = float(window["low"].min())
@@ -264,7 +265,12 @@ def _accept_events(events: list[Event], cfg: MercilessConfig) -> list[Event]:
     last_idx: int | None = None
     last_variant_idx: dict[str, int] = {}
     used_signal_indices: set[int] = set()
-    priority = {"MMQ_FIRST_PULLBACK": 0, "MMQ_MICRO_BREAKOUT": 1, "MMQ_VWAP_RESET": 2, "MMQ_TRAP_RECLAIM": 3}
+    priority = {
+        "MMQ_TRAP_RECLAIM": 0,
+        "MMQ_VWAP_RESET": 1,
+        "MMQ_MICRO_BREAKOUT": 2,
+        "MMQ_FIRST_PULLBACK": 3,
+    }
     for event in sorted(events, key=lambda e: (e[0], priority.get(e[1], 99))):
         idx, variant, _, setup = event
         if idx in used_signal_indices:

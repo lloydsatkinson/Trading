@@ -2,6 +2,8 @@ import pandas as pd
 
 import scripts.run_strategy_research as runner
 
+# A1 is deliberately a single research variant: ORB_LONG_PULLBACK.
+
 
 def test_parse_selection_maps_a1_to_orb_pullback_only():
     strategies, variants = runner._parse_selection("a1")

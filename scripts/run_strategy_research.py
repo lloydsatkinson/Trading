@@ -27,6 +27,7 @@ from scanner.strategies.vwap_momentum.strategy import generate_vwap_signals
 ET = ZoneInfo("America/New_York")
 SERCLICK_BASELINE_END = date(2026, 8, 27)
 TRADABLE_VARIANT_EXCLUSIONS = {"MORNING_OBSERVATION", "SERCLICK_CONTROL"}
+A1_VARIANT = "ORB_LONG_PULLBACK"
 
 
 @dataclass
@@ -46,6 +47,15 @@ class ResearchResult:
 def read_csv(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     return pd.read_csv(path) if path.exists() and path.stat().st_size else pd.DataFrame()
+
+
+def _filter_signal_variants(signals: pd.DataFrame, variants: Iterable[str] | None) -> pd.DataFrame:
+    selected = {str(v).upper() for v in (variants or ()) if str(v).strip()}
+    if signals.empty or not selected:
+        return signals.copy()
+    if "variant_id" not in signals.columns:
+        return signals.iloc[0:0].copy()
+    return signals[signals["variant_id"].astype(str).str.upper().isin(selected)].copy().reset_index(drop=True)
 
 
 def reprice_signal_for_slippage(signal: dict, slippage_bps: float) -> dict:
@@ -279,12 +289,18 @@ def _best_holds(leaderboard: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_news(meta: dict, signals: pd.DataFrame, leaderboard: pd.DataFrame, peak_timing: pd.DataFrame) -> str:
+    a1_only = meta.get("variants") == [A1_VARIANT]
+    strategy_line = (
+        "Strategy: **A1 Stock-in-Play 5-minute ORB + First Pullback (`ORB_LONG_PULLBACK`) only.**"
+        if a1_only
+        else "Strategies: ORB Stocks-in-Play, High-RVOL VWAP Momentum/Reclaim, SerClick/Leo."
+    )
     lines = [
-        "# Multi-Strategy Microcap / Small-Cap Research",
+        "# A1 ORB Pullback Research" if a1_only else "# Multi-Strategy Microcap / Small-Cap Research",
         "",
         f"Run: `{meta['run_id']}` | {meta.get('start_date')} to {meta.get('end_date')} | feed {meta.get('feed')}",
         "",
-        "Strategies: ORB Stocks-in-Play, High-RVOL VWAP Momentum/Reclaim, SerClick/Leo.",
+        strategy_line,
         "",
         "Execution stress: **10, 25, 50, 75, 100 bps** adverse entry slippage; next-bar entries only.",
         "",
@@ -320,10 +336,12 @@ def run_research(
     sessions: int = 60,
     end_date: str | None = None,
     strategies: Iterable[str] = ("orb", "vwap", "serclick"),
+    variants: Iterable[str] | None = None,
     min_n: int = 20,
 ) -> ResearchResult:
     root = Path(root)
     selected = {str(s).lower() for s in strategies}
+    selected_variants = tuple(str(v).upper() for v in (variants or ()) if str(v).strip())
     run_id = f"multistrategy_{datetime.now(ET).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     output_dir = root / "data" / "research" / "multistrategy" / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -356,6 +374,7 @@ def run_research(
     signals = pd.concat(signal_frames, ignore_index=True, sort=False) if signal_frames else pd.DataFrame()
     if not signals.empty:
         signals = signals.drop_duplicates(["strategy_id", "variant_id", "symbol", "date", "entry_timestamp"], keep="first")
+    signals = _filter_signal_variants(signals, selected_variants)
 
     replays, replay_skips = replay_signals(root, feed, signals)
     if not replay_skips.empty:
@@ -380,6 +399,7 @@ def run_research(
         "feed": feed.upper(),
         "requested_sessions": int(sessions),
         "strategies": sorted(selected),
+        "variants": list(selected_variants),
         "start_date": min(start_dates) if start_dates else None,
         "end_date": max(end_dates) if end_dates else end_date,
         "signal_rows": int(len(signals)),
@@ -405,12 +425,13 @@ def run_research(
 
     latest = root / "data" / "latest"
     latest.mkdir(parents=True, exist_ok=True)
-    leaderboard.to_csv(latest / "multistrategy_leaderboard.csv", index=False)
-    best_hold_times.to_csv(latest / "multistrategy_best_hold_times.csv", index=False)
-    peak_timing.to_csv(latest / "multistrategy_peak_timing.csv", index=False)
-    signals.to_csv(latest / "multistrategy_signals.csv", index=False)
-    (latest / "multistrategy_news.md").write_text(news, encoding="utf-8")
-    (latest / "multistrategy_run_meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+    prefix = "a1" if selected_variants == (A1_VARIANT,) else "multistrategy"
+    leaderboard.to_csv(latest / f"{prefix}_leaderboard.csv", index=False)
+    best_hold_times.to_csv(latest / f"{prefix}_best_hold_times.csv", index=False)
+    peak_timing.to_csv(latest / f"{prefix}_peak_timing.csv", index=False)
+    signals.to_csv(latest / f"{prefix}_signals.csv", index=False)
+    (latest / f"{prefix}_news.md").write_text(news, encoding="utf-8")
+    (latest / f"{prefix}_run_meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
 
     return ResearchResult(
         output_dir=output_dir,
@@ -436,21 +457,34 @@ def _parse_strategies(value: str) -> tuple[str, ...]:
     return parts
 
 
+def _parse_selection(value: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    normalized = value.strip().lower()
+    if normalized in {"a1", "orb_long_pullback", "orb-pullback", "orb_pullback"}:
+        return ("orb",), (A1_VARIANT,)
+    return _parse_strategies(value), ()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--strategy", default="all", help="all or comma-separated orb,vwap,serclick")
+    parser.add_argument(
+        "--strategy",
+        default="all",
+        help="a1 for ORB_LONG_PULLBACK only, or all / comma-separated orb,vwap,serclick",
+    )
     parser.add_argument("--feed", default="sip", choices=["sip", "iex"])
     parser.add_argument("--sessions", type=int, default=60)
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--root", default=".")
     parser.add_argument("--min-n", type=int, default=20)
     args = parser.parse_args()
+    strategies, variants = _parse_selection(args.strategy)
     result = run_research(
         root=args.root,
         feed=args.feed,
         sessions=args.sessions,
         end_date=args.end_date,
-        strategies=_parse_strategies(args.strategy),
+        strategies=strategies,
+        variants=variants,
         min_n=args.min_n,
     )
     print("MULTISTRATEGY_DONE", json.dumps({

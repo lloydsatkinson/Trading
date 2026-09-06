@@ -48,7 +48,7 @@ jobs:
         run: |
           SESSIONS="${{ github.event.inputs.sessions }}"
           if [ -z "$SESSIONS" ]; then SESSIONS=60; fi
-          python scripts/run_strategy_research.py --strategy a1 --feed sip --sessions "$SESSIONS" --min-n 20
+          python scripts/run_a1_research.py --feed sip --sessions "$SESSIONS" --min-n 20
       - name: Publish A1 summary
         if: always()
         shell: bash

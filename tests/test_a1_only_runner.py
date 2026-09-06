@@ -1,5 +1,6 @@
 import pandas as pd
 
+import scripts.run_a1_research as a1
 import scripts.run_strategy_research as runner
 
 # A1 is deliberately a single research variant: ORB_LONG_PULLBACK.
@@ -13,7 +14,7 @@ def test_parse_selection_maps_a1_to_orb_pullback_only():
 
 
 def test_a1_uses_frozen_price_and_gap_gate():
-    cfg = runner.A1_ORB_CONFIG
+    cfg = a1.A1_ORB_CONFIG
 
     assert cfg.min_price == 1.0
     assert cfg.max_price == 20.0

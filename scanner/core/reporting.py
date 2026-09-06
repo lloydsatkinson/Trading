@@ -41,6 +41,19 @@ def _median_or_nan(group: pd.DataFrame, column: str) -> float:
     return float(values.median()) if values.notna().any() else np.nan
 
 
+def _eligible_replays(replays: pd.DataFrame) -> pd.DataFrame:
+    """Return rows allowed to contribute to selection/performance statistics.
+
+    Intraday replay frames pre-date the censoring flag and are therefore left
+    untouched. Swing frames use the explicit flag so incomplete hold horizons
+    cannot improve expectancy, PF, MFE/MAE, or drawdown by accident.
+    """
+    if "selection_eligible_replay" not in replays.columns:
+        return replays.copy()
+    eligible = replays["selection_eligible_replay"].fillna(True).astype(bool)
+    return replays.loc[eligible].copy()
+
+
 def summarize_strategy_replays(replays: pd.DataFrame, segment_cols: Iterable[str] = ()) -> pd.DataFrame:
     if replays.empty:
         return pd.DataFrame()
@@ -48,8 +61,14 @@ def summarize_strategy_replays(replays: pd.DataFrame, segment_cols: Iterable[str
     missing = required - set(replays.columns)
     if missing:
         raise ValueError(f"replays missing required columns: {sorted(missing)}")
-    x = replays.copy()
+    x = _eligible_replays(replays)
+    if x.empty:
+        return pd.DataFrame()
     base_groups = ["strategy_id", "variant_id", "direction", "split", "rule_id"]
+    # setup_id is the signal-qualification identity; rule_id is the exit identity.
+    # Never pool different setup thresholds merely because their exit rule matches.
+    if "setup_id" in x.columns:
+        base_groups.append("setup_id")
     if "slippage_bps" in x.columns:
         base_groups.append("slippage_bps")
     for col in segment_cols:
@@ -83,12 +102,81 @@ def summarize_strategy_replays(replays: pd.DataFrame, segment_cols: Iterable[str
             "eligible_n50": n >= 50,
             "eligible_n100": n >= 100,
         })
-        for source in ("stop_pct", "target_pct", "max_hold_minutes", "target_r_multiple", "hold_to_eod"):
+        for source in (
+            "stop_mode", "stop_pct", "target_pct", "max_hold_minutes", "max_hold_sessions",
+            "target_r_multiple", "trailing_exit", "hold_to_eod",
+        ):
             if source in group.columns:
                 non_null = group[source].dropna()
                 row[source] = non_null.iloc[0] if not non_null.empty else np.nan
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def summarize_censoring(replays: pd.DataFrame) -> pd.DataFrame:
+    if replays.empty:
+        return pd.DataFrame()
+    required = {"strategy_id", "variant_id", "split", "max_hold_sessions"}
+    missing = required - set(replays.columns)
+    if missing:
+        raise ValueError(f"replays missing required censor columns: {sorted(missing)}")
+    x = replays.copy()
+    group_cols = ["strategy_id", "variant_id", "split", "max_hold_sessions"]
+    if "setup_id" in x.columns:
+        group_cols.append("setup_id")
+    rows: list[dict[str, Any]] = []
+    for keys, group in x.groupby(group_cols, dropna=False, sort=False):
+        keys = keys if isinstance(keys, tuple) else (keys,)
+        row = dict(zip(group_cols, keys))
+        boundary = group.get("boundary_censored", pd.Series(False, index=group.index)).fillna(False).astype(bool)
+        right = group.get("right_censored", pd.Series(False, index=group.index)).fillna(False).astype(bool)
+        if "selection_eligible_replay" in group.columns:
+            eligible = group["selection_eligible_replay"].fillna(True).astype(bool)
+        else:
+            eligible = ~(boundary | right)
+        row.update({
+            "replays_total": int(len(group)),
+            "eligible_replays": int(eligible.sum()),
+            "eligible_n": int(eligible.sum()),
+            "boundary_censored_n": int(boundary.sum()),
+            "right_censored_n": int(right.sum()),
+            "censored_rate": float((~eligible).mean()) if len(group) else np.nan,
+        })
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def summarize_swing_holds(replays: pd.DataFrame) -> pd.DataFrame:
+    if replays.empty:
+        return pd.DataFrame()
+    segment_cols = [col for col in ("max_hold_sessions", "price_bucket", "market_cap_bucket") if col in replays.columns]
+    summary = summarize_strategy_replays(replays, segment_cols=segment_cols)
+    if summary.empty:
+        return summary
+
+    eligible = _eligible_replays(replays)
+    group_cols = ["strategy_id", "variant_id", "direction", "split", "rule_id"]
+    if "setup_id" in eligible.columns:
+        group_cols.append("setup_id")
+    if "slippage_bps" in eligible.columns:
+        group_cols.append("slippage_bps")
+    for col in segment_cols:
+        if col in eligible.columns and col not in group_cols:
+            group_cols.append(col)
+
+    peak_rows: list[dict[str, Any]] = []
+    for keys, group in eligible.groupby(group_cols, dropna=False, sort=False):
+        keys = keys if isinstance(keys, tuple) else (keys,)
+        row = dict(zip(group_cols, keys))
+        row.update({
+            "mean_trading_days_to_peak": _mean_or_nan(group, "trading_days_to_peak"),
+            "median_trading_days_to_peak": _median_or_nan(group, "trading_days_to_peak"),
+            "mean_calendar_days_to_peak": _mean_or_nan(group, "calendar_days_to_peak"),
+            "median_calendar_days_to_peak": _median_or_nan(group, "calendar_days_to_peak"),
+        })
+        peak_rows.append(row)
+    peaks = pd.DataFrame(peak_rows)
+    return summary.merge(peaks, on=group_cols, how="left") if not peaks.empty else summary
 
 
 def _first_bps(table: pd.DataFrame, predicate) -> float:

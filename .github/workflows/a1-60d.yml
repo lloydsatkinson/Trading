@@ -1,0 +1,70 @@
+name: A1 ORB Pullback 60D Research
+
+on:
+  push:
+    branches:
+      - feature/a1-orb-pullback-only-v2
+  workflow_dispatch:
+    inputs:
+      sessions:
+        description: Number of completed trading sessions
+        required: false
+        default: "60"
+
+permissions:
+  contents: read
+
+jobs:
+  a1-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      APCA_API_BASE_URL: https://paper-api.alpaca.markets
+      PYTHONPATH: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Restore multistrategy market-data cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache/multistrategy_alpaca
+          key: a1-60d-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            a1-60d-${{ runner.os }}-
+            multistrategy-${{ runner.os }}-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: A1 verification
+        run: pytest -q tests/test_a1_only_runner.py tests/test_orb_strategy.py
+      - name: Run standalone A1 research
+        shell: bash
+        run: |
+          SESSIONS="${{ github.event.inputs.sessions }}"
+          if [ -z "$SESSIONS" ]; then SESSIONS=60; fi
+          python scripts/run_a1_research.py --feed sip --sessions "$SESSIONS" --min-n 20
+      - name: Publish A1 summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f data/latest/a1_news.md ]; then
+            cat data/latest/a1_news.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "A1 research did not produce a1_news.md. Inspect logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload A1 research artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a1-orb-pullback-60d-${{ github.run_id }}
+          path: |
+            data/latest/a1_*
+            data/research/multistrategy/
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,27 @@
+name: A1 ORB Pullback Verify
+
+on:
+  push:
+    branches:
+      - feature/a1-orb-pullback-only-v2
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  a1-tests:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run A1-only tests
+        run: pytest -q tests/test_a1_only_runner.py

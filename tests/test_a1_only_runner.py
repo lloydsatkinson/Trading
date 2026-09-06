@@ -12,6 +12,14 @@ def test_parse_selection_maps_a1_to_orb_pullback_only():
     assert variants == ("ORB_LONG_PULLBACK",)
 
 
+def test_a1_uses_frozen_price_and_gap_gate():
+    cfg = runner.A1_ORB_CONFIG
+
+    assert cfg.min_price == 1.0
+    assert cfg.max_price == 20.0
+    assert cfg.min_gap_pct == 0.10
+
+
 def test_filter_signal_variants_keeps_only_a1_pullback_rows():
     signals = pd.DataFrame(
         [

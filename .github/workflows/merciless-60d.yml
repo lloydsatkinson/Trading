@@ -1,0 +1,93 @@
+name: Merciless-Q 60D Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      sessions:
+        description: Number of completed trading sessions
+        required: false
+        default: "60"
+      end_date:
+        description: Optional YYYY-MM-DD end date
+        required: false
+        default: ""
+  push:
+    branches:
+      - feature/merciless-q
+    paths:
+      - .github/workflows/merciless-60d.yml
+
+permissions:
+  contents: read
+
+jobs:
+  merciless-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      APCA_API_BASE_URL: https://paper-api.alpaca.markets
+      PYTHONPATH: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore Merciless market-data cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache/multistrategy_alpaca
+          key: merciless-60d-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            merciless-60d-${{ runner.os }}-
+            multistrategy-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Merciless verification tests
+        run: >-
+          pytest -q
+          tests/test_merciless_q_strategy.py
+          tests/test_merciless_q_reentry.py
+          tests/test_merciless_q_reporting.py
+          tests/test_merciless_q_rules.py
+          tests/test_merciless_q_causality.py
+          tests/test_no_cost_merciless_end_to_end.py
+
+      - name: Run 60-session SIP research
+        shell: bash
+        run: |
+          SESSIONS="${{ github.event.inputs.sessions }}"
+          if [ -z "$SESSIONS" ]; then SESSIONS=60; fi
+          END_DATE="${{ github.event.inputs.end_date }}"
+          ARGS=(--strategy merciless --feed sip --sessions "$SESSIONS" --min-n 20)
+          if [ -n "$END_DATE" ]; then ARGS+=(--end-date "$END_DATE"); fi
+          python scripts/run_strategy_research.py "${ARGS[@]}"
+
+      - name: Publish research summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f data/latest/multistrategy_news.md ]; then
+            cat data/latest/multistrategy_news.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Merciless-Q research did not produce multistrategy_news.md. Inspect logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload research artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: merciless-60d-${{ github.run_id }}
+          path: |
+            data/latest/
+            data/research/multistrategy/
+          if-no-files-found: warn
+          retention-days: 30
